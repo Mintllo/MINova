@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮歌词新图标：圆润双音符 + 统一圆角笔画，比旧版更现代 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M20.5,3.2c-0.5,-0.3 -1.1,-0.2 -1.5,0.2l-7.4,6.6c-0.4,0.4 -0.6,0.9 -0.6,1.5v5.9c-0.5,-0.3 -1.1,-0.5 -1.8,-0.5c-1.9,0 -3.4,1.5 -3.4,3.4S7.3,23.7 9.2,23.7s3.4,-1.5 3.4,-3.4V11.6l6.4,-5.7v4.8c-0.5,-0.3 -1.1,-0.5 -1.8,-0.5c-1.9,0 -3.4,1.5 -3.4,3.4c0,1.9 1.5,3.4 3.4,3.4s3.4,-1.5 3.4,-3.4V4.6C20.6,4.1 21,3.5 20.5,3.2z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4.2,7.4h4.6c0.6,0 1,0.4 1,1s-0.4,1 -1,1H4.2c-0.6,0 -1,-0.4 -1,-1S3.6,7.4 4.2,7.4z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4.2,11.4h3.2c0.6,0 1,0.4 1,1s-0.4,1 -1,1H4.2c-0.6,0 -1,-0.4 -1,-1S3.6,11.4 4.2,11.4z" />
+</vector>

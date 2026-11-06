@@ -1,0 +1,106 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+}
+
+android {
+    namespace = "com.HyperX.MI.Na"
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = "com.HyperX.MI.Na"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 13
+        versionName = "1.3.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            // Only ship the dominant phone ABI + the emulator ABI.
+            // Previously all four ABIs (x86/x86_64/armeabi-v7a/arm64-v8a) were bundled,
+            // which alone accounted for ~100 MB of native libraries.
+            abiFilters.addAll(["arm64-v8a", "x86_64"])
+        }
+    }
+
+    experimentalProperties["android.experimental.suppressAndroidJarIncompatibilities"] = "true"
+
+    buildFeatures {
+        compose = true
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("../release.keystore")
+            storePassword = "minova2026"
+            keyAlias = "minova"
+            keyPassword = "minova2026"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            signingConfig = signingConfigs.getByName("release")
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    
+    aaptOptions {
+        cruncherEnabled = false
+    }
+    
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+            languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_3)
+        }
+    }
+}
+
+dependencies {
+    // 与 KernelSU 3.3.1 对齐的 Compose 版本
+    implementation("com.google.zxing:core:3.5.3")
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation 'com.google.android.gms:play-services-ads:23.2.0'
+    implementation("io.github.kyant0:backdrop:2.0.0")
+    implementation("io.github.kyant0:shapes:1.2.0")
+    implementation("io.coil-kt.coil3:coil-compose:3.0.4")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:3.0.4")
+    implementation("com.google.code.gson:gson:2.14.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    // 与 KernelSU 3.3.1 完全一致（照搬其色彩系统）
+    implementation("com.materialkolor:material-kolor:5.0.1")
+    implementation("androidx.media:media:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.compose.material:material-icons-extended")
+    // KSU 3.3.1 使用 material3 1.5.0-alpha28（提供 SegmentedListItem 等 MD3 分离式列表原生组件）
+    implementation("androidx.compose.material3:material3:1.5.0-alpha28")
+    implementation("androidx.compose.material3:material3-window-size-class:1.5.0-alpha28")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0'
+    implementation("androidx.compose.ui:ui")
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.ui)
+    implementation(libs.androidx.ui.graphics)
+    implementation(libs.androidx.ui.tooling.preview)
+    // MIUIX 组件库（底部导航栏 / 液态玻璃所需）
+    implementation(libs.miuix.ui)
+    implementation(libs.miuix.blur)
+    // ffmpeg-kit（音频格式转换）：官方仓库 2025 归档，但制品仍在 Maven Central。
+    // 6.0-2 = full 变体（含 lame/vorbis/opus/twolame/opencore-amr/amrwbenc 等音频编码器）。
+    implementation("com.arthenica:ffmpeg-kit-audio:6.0-2")
+    debugImplementation(libs.androidx.ui.tooling)
+    debugImplementation(libs.androidx.ui.test.manifest)
+}

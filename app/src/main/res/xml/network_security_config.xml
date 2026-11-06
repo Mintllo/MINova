@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  证书固定(pin-set)已移除：原 pin 是对 Let's Encrypt 叶证书 SPKI 的固定，
+  而 LE 每次续期都会更换叶证书密钥，导致续期后 App 全量请求 TLS 握手失败
+  （SSLHandshakeException: Pin verification failed）。
+  现改回标准 CA 校验（系统 CA + 用户 CA），并由系统完成域名与有效期校验。
+-->
+<network-security-config>
+    <domain-config>
+        <domain includeSubdomains="false">YOUR_API_HOST</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </domain-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
