@@ -286,7 +286,13 @@ data class LyricData(
     /** LRC 头部 `[ti:...]`，用于校验「这份歌词是不是这首歌的」；没有该标签时为空 */
     val title: String = "",
     /** LRC 头部 `[ar:...]`，同上 */
-    val artist: String = ""
+    val artist: String = "",
+    /**
+     * 上游明确标注为纯音乐 / 无歌词（占位歌词命中）。
+     * 只用于区分文案：纯音乐 →「纯音乐，请欣赏」，普通无词 →「暂无歌词」；
+     * 前奏期间（有歌词但还没到第一句）两者都不对，应显示「等待前奏…」。
+     */
+    val instrumental: Boolean = false
 )
 
 /**
@@ -367,7 +373,11 @@ class MusicApiService {
                 }
                 jobs.forEach { (srcName, job) ->
                     job.await().forEach { ps ->
-                        val key = (ps.name + "|" + ps.artist).lowercase()
+                        // 去重键必须带版本标识：否则同一首歌的「原唱 / DJ版 / Live / 翻唱 / 伴奏」
+                        // 会被合并成一条，先到的版本胜出（免 Cookie 源排在前面，DJ 版常常先到）
+                        // →「搜不到原唱」「收藏的原唱点进去变成 DJ 版」。
+                        val key = (ps.name + "|" + ps.artist).lowercase() +
+                            "|" + (parseVersionTag(ps.name, ps.album) ?: "")
                         if (!merged.containsKey(key)) {
                             merged[key] = Song(id = ps.id, name = ps.name, artist = ps.artist,
                                 album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
@@ -376,30 +386,9 @@ class MusicApiService {
                     }
                 }
             }
-            // 原唱优先：没有版本修饰（Live / DJ版 / 翻唱 / 伴奏…）的排在最前面，
-            // 否则搜「孤独患者」这类歌时很容易先看到翻唱/串烧版，看起来像"搜不到原唱"。
-            // sortedBy 是稳定排序，同组内保持原来的多音源顺序。
-            // 按「与搜索词的相关度」排序，而不是只看有没有版本修饰：
-            // 完全同名 > 以搜索词开头 > 包含搜索词 > 其它；
-            // 同档次里再让没有版本修饰的（更可能是原唱）和歌名更短的排前面。
-            // 之前只按"有无版本修饰"分组，组内保持上游顺序，所以搜"紫荆花盛开"时
-            // 真正的原唱可能被排在最底下。
-            val query = keyword.trim().lowercase()
-            merged.values.toList().sortedWith(
-                compareBy(
-                    { song ->
-                        val n = song.name.lowercase()
-                        when {
-                            n == query -> 0
-                            n.startsWith(query) -> 1
-                            n.contains(query) -> 2
-                            else -> 3
-                        }
-                    },
-                    { song -> if (parseVersionTag(song.name, song.album) == null) 0 else 1 },
-                    { song -> song.name.length }
-                )
-            )
+            // 按「抓取到达顺序」原样返回：展示层统一做整体倒序（用户要求默认倒序、不可调整）。
+            // 这里不再做「原唱优先」重排 —— sortSearchResults / isJunkVersion 保留但已不参与展示。
+            merged.values.toList()
         }.getOrNull().orEmpty()
 
         // 全空时自动重试一次：上游偶发抽风（限流/超时）时第二次往往就正常。
@@ -451,6 +440,42 @@ class MusicApiService {
         } catch (_: Exception) {
             Result.failure(Exception("Search failed"))
         }
+    }
+
+    /**
+     * 加载更多：同一个关键词取**下一页**（后端 `/api/v1/music/search` 的 page 从 1 开始）。
+     *
+     * 只在 page > 1 时才把 `page` 拼进 query（page=1 与不传等价），因此对原有调用零影响。
+     * 返回的是这一页的新歌；去重/合并交给调用方（ViewModel.loadMoreSearch）。
+     */
+    suspend fun searchPage(keyword: String, page: Int): List<Song> = withContext(Dispatchers.IO) {
+        if (keyword.isBlank() || page < 2) return@withContext emptyList()
+        val sources = listOf("kuwo", "migu", "bilibili", "netease", "qq", "kugou")
+        val merged = java.util.Collections.synchronizedMap(LinkedHashMap<String, Song>())
+        kotlinx.coroutines.coroutineScope {
+            val jobs = sources.map { srcName ->
+                srcName to async(Dispatchers.IO) {
+                    kotlinx.coroutines.withTimeoutOrNull(8_000) {
+                        runCatching {
+                            MusicApiClient.searchSongs(keyword, MusicSource.fromName(srcName), page)
+                        }.getOrNull().orEmpty()
+                    }.orEmpty()
+                }
+            }
+            jobs.forEach { (srcName, job) ->
+                job.await().forEach { ps ->
+                    // 与 search() 同一套去重键（带版本标识），保证两个入口的口径一致
+                    val key = (ps.name + "|" + ps.artist).lowercase() +
+                        "|" + (parseVersionTag(ps.name, ps.album) ?: "")
+                    if (!merged.containsKey(key)) {
+                        merged[key] = Song(id = ps.id, name = ps.name, artist = ps.artist,
+                            album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
+                            source = ps.source.ifBlank { srcName })
+                    }
+                }
+            }
+        }
+        merged.values.toList()
     }
 
     private fun fetchCovers(ids: String): Map<Long, String> {
@@ -536,24 +561,27 @@ class MusicApiService {
     }
 
     private fun parseLrc(lrcText: String, tlyricText: String): LyricData {
-        val lyrics = mutableMapOf<Long, String>()
-        val translations = mutableMapOf<Long, String>()
-        val times = mutableListOf<Long>()
         val tagRe = Regex("\\[(\\d{1,2}):(\\d{2})(?:[.:](\\d{1,3}))?\\]")
+        // 同一时间戳上游常常打包多份文本：原文 / 罗马音 / 中文翻译（netease、kugou、qq 都这样）。
+        // 先把"这个时间戳下的所有候选文本"按出现顺序收集，最后统一择优 —— 边收边覆盖会丢原文。
+        val candidates = LinkedHashMap<Long, MutableList<String>>()
+        val times = mutableListOf<Long>()
 
-        fun feed(line: String, target: MutableMap<Long, String>, collectTimes: Boolean) {
+        fun feed(line: String, collectTimes: Boolean) {
             val tags = tagRe.findAll(line).toList()
             if (tags.isEmpty()) return
             val text = tagRe.replace(line, "").trim()
             if (text.isEmpty() || text == "//") return
-            // kugou 等平台的 LRC 会给"每一个字"都打时间戳：
-            //   [00:00.00]周[00:00.93]杰[00:01.86]伦
-            // 这种情况如果照旧"每个时间戳都写一遍整行"，同一句会在每个字的时间点
-            // 反复出现 —— 用户看到的就是开头那几行作词/作曲/制作人信息不停重复，
-            // 后面真正的歌词全被挤掉了。识别出来后只取第一个时间戳写一次。
+            // kugou/qq 会给"每一个字"都打时间戳：[00:00.00]周[00:00.93]杰[00:01.86]伦
+            // 照旧"每个时间戳都写一遍整行"会让同一句在每个字的时间点反复出现，
+            // 开头几行作词/作曲信息不停重复、真正的歌词被挤掉。
             val segments = line.split(tagRe).map { it.trim() }.filter { it.isNotEmpty() }
             val charwise = tags.size >= 3 && segments.isNotEmpty() && segments.all { it.length <= 2 }
-            val effective = if (charwise) listOf(tags.first()) else tags
+            // 增强型 LRC：行尾还有一个"结束时间"标签：[00:16.00]白昼夢 繋いでいて[00:20.00]
+            // 这类行只能用第一个标签当歌词时间；否则同一句会被写到结束时间上，
+            // 和下一小节的真正歌词抢同一个时间戳（表现为歌词错位/串行）。
+            val endsWithTag = line.trimEnd().endsWith("]")
+            val effective = if (charwise || (endsWithTag && tags.size >= 2)) listOf(tags.first()) else tags
             effective.forEach { mm ->
                 val min = mm.groupValues[1].toLongOrNull() ?: return@forEach
                 val sec = mm.groupValues[2].toLongOrNull() ?: return@forEach
@@ -565,33 +593,35 @@ class MusicApiService {
                     else -> fracRaw.take(3).toLong()
                 }
                 val t = min * 60000 + sec * 1000 + frac
-                // 同一时间戳上游常给两行：「中文原词」+「粤语拼音/罗马音」。
-                // 直接覆盖会让音译把中文顶掉（用户看到整首都是拼音），
-                // 所以中文优先留主行，音译降级进翻译行。
-                val prev = target[t]
-                if (prev == null) {
-                    target[t] = text
-                } else {
-                    val prevCjk = prev.any { it.code in 0x4E00..0x9FFF }
-                    val newCjk = text.any { it.code in 0x4E00..0x9FFF }
-                    when {
-                        !prevCjk && newCjk -> {
-                            if (translations[t].isNullOrBlank()) translations[t] = prev
-                            target[t] = text
-                        }
-                        prevCjk && !newCjk -> {
-                            if (translations[t].isNullOrBlank()) translations[t] = text
-                        }
-                        else -> target[t] = text
-                    }
-                }
+                val list = candidates.getOrPut(t) { mutableListOf() }
+                if (!list.contains(text)) list.add(text)
                 if (collectTimes && !times.contains(t)) times.add(t)
             }
         }
 
-        lrcText.lines().forEach { feed(it, lyrics, true) }
-        tlyricText.lines().forEach { feed(it, translations, false) }
+        lrcText.lines().forEach { feed(it, true) }
+        tlyricText.lines().forEach { feed(it, false) }
         times.sort()
+
+        // ── 择优：原文优先（假名/谚文 > 汉字 > 其它）──
+        // 旧逻辑是"同时间戳后到的那行直接覆盖"，于是日文歌里最后到达的中文翻译
+        // 把日文原文顶掉，只剩罗马音/拼音（用户反馈「日文显示成拼音」）。
+        // 现在：含假名/谚文的必是日/韩原文，优先当主行；翻译位优先放"另一种原生文字"。
+        val kanaRe = Regex("[\\u3040-\\u309F\\u30A0-\\u30FF\\uFF66-\\uFF9F\\uAC00-\\uD7AF\\u1100-\\u11FF\\u3130-\\u318F]")
+        fun nativeCount(s: String) = s.count { isNativeText(it) }
+        val lyrics = LinkedHashMap<Long, String>()
+        val translations = LinkedHashMap<Long, String>()
+        for (t in times) {
+            val list = candidates[t]?.filter { it.isNotBlank() } ?: continue
+            if (list.isEmpty()) continue
+            val main = list.firstOrNull { kanaRe.containsMatchIn(it) }
+                ?: list.firstOrNull { nativeCount(it) > 0 }
+                ?: list.first()
+            lyrics[t] = main
+            val others = list.filter { it != main }
+            val trans = others.firstOrNull { nativeCount(it) > 0 } ?: others.firstOrNull()
+            if (trans != null) translations[t] = trans
+        }
 
         // 头部元信息（[ti:歌名] / [ar:歌手]）：用来校验「这份歌词是不是这首歌的」。
         // 没有这两个标签时留空，此时不做校验（宁可显示，也不误杀正确歌词）。
@@ -602,7 +632,10 @@ class MusicApiService {
         // 这类内容不是真歌词，直接视为无歌词（不显示），避免误导用户。
         val joined = lyrics.values.joinToString(" ")
         val placeholderOnly = lyrics.size <= 2 && PLACEHOLDER_LYRICS.any { joined.contains(it) }
-        if (placeholderOnly) return LyricData(title = meta("ti"), artist = meta("ar"))
+        if (placeholderOnly) {
+            // 占位歌词不是真歌词，但它是"纯音乐/无词"的唯一可靠信号 → 记下来给 UI 用
+            return LyricData(title = meta("ti"), artist = meta("ar"), instrumental = true)
+        }
 
         return LyricData(lyrics, translations, times, meta("ti"), meta("ar"))
     }
@@ -617,6 +650,25 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val userFile = File(application.filesDir, "user_info.dat")
     private val historyFile = File(application.filesDir, "search_history.json")
     private val playCountsFile = File(application.filesDir, "play_counts.json")
+    /** 收藏本地缓存：未登录也能收藏、离线/重启不丢；登录后与服务端取并集 */
+    // 注意 get() 里不能直接用构造参数 application（只有初始化器能看见它），要用 getApplication()
+    private val favoritesFile: File
+        get() = File(getApplication<Application>().filesDir, "favorites_" + favoritesOwner() + ".json")
+
+    /**
+     * 收藏缓存的归属账号（和推荐/口味的做法一致）。
+     * 必须按账号隔离：否则 A 退出、B 登录时，A 留在本地的收藏会被当成"本地新增"
+     * 补传到 B 的账号上（串号 + 数据污染）。
+     */
+    private fun favoritesOwner(): String = try {
+        if (userFile.exists()) {
+            val jo = JSONObject(userFile.readText())
+            val id = jo.optLong("id", 0L)
+            if (id > 0L) "id$id" else jo.optString("username", "").ifBlank { "guest" }
+        } else "guest"
+    } catch (_: Exception) {
+        "guest"
+    }
 
     var mediaPlayer: MediaPlayer? = null
         private set
@@ -730,6 +782,61 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val searchResults: StateFlow<List<Song>> = _searchResults
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching
+
+    // ── 「加载更多」分页状态 ──
+    /** 当前关键词已经加载到第几页（后端 page 从 1 开始） */
+    private var currentSearchPage = 1
+    /** 当前搜索关键词：加载更多必须用同一个词 */
+    private var currentSearchKeyword = ""
+    private val _hasMoreSearch = MutableStateFlow(false)
+    val hasMoreSearch: StateFlow<Boolean> = _hasMoreSearch
+    /**
+     * 加载更多：用同一个关键词取下一页并**追加**到现有结果（按 id+source 去重）。
+     *
+     * 后端 page 从 1 开始；page>=2 时上游会把"弱相关"的结果也带回来（放开每源条数后更明显），
+     * 所以追加前先做**相关性过滤**：歌名或歌手（按 `/ 、 & , ; 空格` 拆词）里必须命中搜索词的
+     * 至少一个 token（大小写不敏感、去标点后比较）；一条都不含关键词的直接丢弃。
+     */
+    fun loadMoreSearch() {
+        val kw = currentSearchKeyword
+        if (kw.isBlank() || _isLoadingMore.value || !_hasMoreSearch.value) return
+        _isLoadingMore.value = true
+        viewModelScope.launch {
+            val next = currentSearchPage + 1
+            val raw = runCatching { apiService.searchPage(kw, next) }.getOrDefault(emptyList())
+            // 搜索词拆 token：去掉空白与标点（中英文都要处理）
+            val tokens = kw.lowercase()
+                .split(Regex("[\\s\\p{Punct}·・、，。！？；：…—～「」『』（）()【】]+"))
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            // 相关性过滤：歌名 + 歌手（先按分隔符拆词再拼起来比，避免"跨词拼出的假命中"影响判断）
+            val relevant = if (tokens.isEmpty()) raw else raw.filter { s ->
+                val words = (s.name + " " + s.artist).lowercase()
+                    .split(Regex("[/、&,，;；|\\s]+"))
+                    .filter { it.isNotBlank() }
+                tokens.any { t -> words.any { w -> w.contains(t) } }
+            }
+            val existing = _searchResults.value
+            val keys = existing.map { it.id + "|" + it.source }.toMutableSet()
+            val added = relevant.filter { keys.add(it.id + "|" + it.source) }
+            if (raw.isEmpty()) {
+                // 后端这一页是空的 → 真的没有更多了
+                _hasMoreSearch.value = false
+            } else {
+                if (added.isNotEmpty()) {
+                    // 展示层是确定性排序（见 sortedSearchResults），新一页放在**前面**，
+                    // 排完后新歌落在列表底部（用户当前视线下方，继续下滑即可看到）。
+                    _searchResults.value = added + existing
+                }
+                // 只要后端还有数据就继续往后翻页（这一页全被相关性过滤掉也不代表没有下一页）
+                currentSearchPage = next
+            }
+            _isLoadingMore.value = false
+        }
+    }
+
+    private val _isLoadingMore = MutableStateFlow(false)
+    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore
     private val _currentSong = MutableStateFlow<Song?>(null)
     val currentSong: StateFlow<Song?> = _currentSong
     private val _isPlaying = MutableStateFlow(false)
@@ -756,6 +863,73 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val updateInfo: StateFlow<UpdateData?> = _updateInfo
     private val _historyList = MutableStateFlow<List<Song>>(emptyList())
     val historyList: StateFlow<List<Song>> = _historyList
+
+    /** 服务端维护状态；null = 未知/正常（绝不因为维护检查本身挡住使用）。 */
+    private val _maintenance = MutableStateFlow<MaintenanceInfo?>(null)
+    val maintenance: StateFlow<MaintenanceInfo?> = _maintenance
+
+    /** 本次会话内已确认的维护提示签名（level 1 横幅 / level 2 弹窗可关；level 3 永远不可关）。 */
+    private val _maintenanceAcked = MutableStateFlow("")
+    val maintenanceAcked: StateFlow<String> = _maintenanceAcked
+
+    /**
+     * 检查服务端维护状态：GET {API_BASE_URL}/api/v1/system/maintenance（普通 GET，不需要登录）。
+     *
+     * 返回 { code, msg, data:{ level, title, message, until, allowPlayback } }。
+     * **任何失败都按「正常」处理**（state 置 null）——维护检查本身绝不能挡住用户使用。
+     */
+    fun checkMaintenance() {
+        viewModelScope.launch(Dispatchers.IO) {
+            // ⚠️ 这个接口挂在 go-music-api 上（带 /music-api 前缀），根路径会 404 ——
+            // 实测：/api/v1/system/maintenance → 404，/music-api/api/v1/system/maintenance → 200。
+            // （公告/版本接口反而只挂在根路径上，两者不是同一个服务，不能混用同一个前缀。）
+            val candidates = listOf(
+                MusicApiClient.baseUrl.trimEnd('/') + "/api/v1/system/maintenance",
+                API_BASE_URL.trimEnd('/') + "/music-api/api/v1/system/maintenance",
+            ).distinct()
+            for (url in candidates) {
+                try {
+                    val conn = URL(url).openConnection() as HttpURLConnection
+                    conn.requestMethod = "GET"
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    conn.setRequestProperty("Accept", "application/json")
+                    conn.setRequestProperty("User-Agent", "MINova-Android")
+                    val code = conn.responseCode
+                    val text = conn.inputStream.bufferedReader().readText()
+                    conn.disconnect()
+                    if (code !in 200..299) continue
+                    val root = JSONObject(text)
+                    val o = root.optJSONObject("data") ?: root
+                    val level = o.optInt("level", 0).coerceIn(0, 3)
+                    android.util.Log.d(
+                        "MINova-MAINT",
+                        "url=" + url + " level=" + level + " title=" + o.optString("title") +
+                            " until=" + o.optString("until") +
+                            " allowPlayback=" + o.optBoolean("allowPlayback", false)
+                    )
+                    _maintenance.value = MaintenanceInfo(
+                        level = level,
+                        title = o.optString("title"),
+                        message = o.optString("message"),
+                        until = o.optString("until"),
+                        allowPlayback = o.optBoolean("allowPlayback", false),
+                    )
+                    return@launch
+                } catch (e: Exception) {
+                    android.util.Log.d("MINova-MAINT", "try failed url=" + url + " : " + e.message)
+                }
+            }
+            // 全部失败：按「正常」处理，绝不因为维护检查挡住用户
+            android.util.Log.d("MINova-MAINT", "all endpoints failed, treat as normal")
+            _maintenance.value = null
+        }
+    }
+
+    /** 用户关掉了本次维护提示（level 1 横幅 / level 2 弹窗）：本次会话内不再显示。 */
+    fun ackMaintenance(info: MaintenanceInfo) {
+        _maintenanceAcked.value = info.signature()
+    }
 
     /** 本地真实播放次数：songId -> 次数。全网无公开的单曲播放量接口（已实测），
      *  因此这里统计用户在本机的实际播放次数，作为真实、可解释的「播放量」展示。 */
@@ -839,6 +1013,41 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     data class AnnouncementData(val title: String, val content: String, val time: String)
     data class UpdateData(val version: String, val versionCode: Int, val updateUrl: String, val updateLog: String, val forceUpdate: Boolean)
 
+    /**
+     * 服务端维护状态（GET {base}/api/v1/system/maintenance）。
+     * level：0 正常 / 1 普通维护 / 2 重要维护 / 3 紧急停机。
+     */
+    data class MaintenanceInfo(
+        val level: Int = 0,
+        val title: String = "",
+        val message: String = "",
+        val until: String = "",
+        val allowPlayback: Boolean = false,
+        /** 展示样式，服务端可自定义：banner=顶部横幅 / fullscreen=整屏维护页 / dialog=居中弹窗；留空则按 level 自动选。 */
+        val style: String = "",
+    ) {
+        /** 会话内「已确认」的签名：level 或文案变化后重新提示。 */
+        fun signature(): String = level.toString() + "|" + title + "|" + message
+
+        /** 接口文案为空时的默认标题。 */
+        fun displayTitle(): String = title.ifBlank {
+            when {
+                level >= 3 -> "系统维护中，暂时无法使用"
+                level == 2 -> "系统维护中，建议稍后再使用"
+                else -> "系统维护中，部分功能可能不稳定"
+            }
+        }
+
+        /** 接口文案为空时的默认正文。 */
+        fun displayMessage(): String = message.ifBlank {
+            when {
+                level >= 3 -> "服务器正在紧急停机维护，服务暂时不可用，请稍后再试。"
+                level == 2 -> "重要维护进行中，部分功能可能不可用，建议稍后再使用。"
+                else -> "部分功能可能不稳定，正在处理中，感谢理解。"
+            }
+        }
+    }
+
     private val _isLoggedIn = MutableStateFlow(false)
     val isLoggedIn: StateFlow<Boolean> = _isLoggedIn
     private val _currentUser = MutableStateFlow<UserInfo?>(null)
@@ -863,6 +1072,25 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         private const val ENC_API = "aHR0cHM6Ly84LjE0OC44NC4yOjY0NzI="
     val API_BASE_URL: String get() = String(android.util.Base64.decode(ENC_API, android.util.Base64.DEFAULT))
         const val CLIENT_VERSION_CODE = 13
+
+        /** 直链解析：同源同 id 快路径超时（ms）。一次请求，通常 <1s。 */
+        private const val PLAY_FAST_TIMEOUT_MS = 4_000L
+
+        /** 直链解析：跨源严格搜索的单源超时（ms）。超时视为没找到，继续下一个源/下一首，绝不卡住切歌。 */
+        private const val PLAY_STRICT_TIMEOUT_MS = 4_000L
+
+        /**
+         * 跨源严格搜索的**总预算**（ms）。
+         * 逐源 4s × 6 个源 = 24s 会串成"点了歌要等十几秒"，所以整段搜索必须再有总闸门：
+         * 超了就按"没找到"处理，起播流程绝不为找歌无限等。
+         */
+        private const val PLAY_STRICT_TOTAL_BUDGET_MS = 6_000L
+
+        /** 试听片段最多重试次数：超过就跳过该歌，避免「同一个源反复 prepare→再试听」的静默死循环。 */
+        private const val PREVIEW_RETRY_LIMIT = 3
+
+        /** 下一首预解析直链的保鲜期（ms）。 */
+        private const val PREFETCH_TTL_MS = 5 * 60_000L
     }
 
     private fun sha256(input: String): String {
@@ -892,7 +1120,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun addToHistory(keyword: String) { if (keyword.isBlank()) return; val list = _searchHistory.value.toMutableList(); list.remove(keyword); list.add(0, keyword); if (list.size > 15) list.removeAt(list.size - 1); _searchHistory.value = list; saveHistoryToFile() }
     fun clearHistory() { _searchHistory.value = emptyList(); saveHistoryToFile() }
 
-    fun searchOnline(keyword: String) { if (keyword.isBlank()) return; addToHistory(keyword); _isSearching.value = true; viewModelScope.launch { apiService.search(keyword).onSuccess { _searchResults.value = it }.onFailure { _toastMessage.value = "网络异常" }; _isSearching.value = false } }
+    fun searchOnline(keyword: String) { if (keyword.isBlank()) return; addToHistory(keyword); currentSearchKeyword = keyword; currentSearchPage = 1; _hasMoreSearch.value = true; _isLoadingMore.value = false; _isSearching.value = true; viewModelScope.launch { apiService.search(keyword).onSuccess { _searchResults.value = it; _hasMoreSearch.value = it.isNotEmpty() }.onFailure { _toastMessage.value = "网络异常" }; _isSearching.value = false } }
 
     private fun loadDownloadedSongs() {
         try {
@@ -958,7 +1186,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         runCatching { MusicApiClient.resolveSongUrlByName(song.id, song.name, song.artist, k) }
                             .getOrNull()?.let { if (it.startsWith("http")) return@run it }
                     }
-                    apiService.getFallbackUrl(song.id)
+                    // 关键：这个兜底是网易云的 outer 接口，只能拿网易云自己的 id 用。
+                    // 其他平台（B站/酷我/酷狗…）的 id 丢进去，网易云会返回"同 id 的另一首歌"，
+                    // 于是歌名/封面/歌词都对、声音却完全不是那首歌。
+                    if (song.source.equals("netease", ignoreCase = true)) {
+                        apiService.getFallbackUrl(song.id)
+                    } else {
+                        throw IllegalStateException("NO_FREE_SOURCE")
+                    }
                 }
                 val musicFile = File(downloadDir, "${song.id}.mp3")
                 val connection = URL(url).openConnection() as HttpURLConnection
@@ -1054,8 +1289,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playExternalSong(song: Song, sourceKey: String, queue: List<Song>? = null) {
+        playStartedAt = System.currentTimeMillis()
         // 歌单里的歌也要记住队列，否则这首放完不知道该接哪一首
-        if (!queue.isNullOrEmpty()) _playQueue.value = queue
+        if (!queue.isNullOrEmpty() && _playQueue.value != queue) {
+            _playQueue.value = queue
+            prefetchedPlays.clear()
+        }
         playJob?.cancel()
         playJob = viewModelScope.launch {
             _isPlaying.value = false
@@ -1064,38 +1303,49 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             _duration.value = song.duration * 1000L
             _currentLyrics.value = LyricData()
             _currentLyricIndex.value = -1
+            previewRetryCount = 0
             releasePlayer()
             try {
                 val url = run {
-                    // 免费音源优先：酷我 / 咪咕 / B站 的免费曲库命中率最高，
+                    // ① 快路径：同源同 id 直取（一次请求，最快；同平台同 id 必然同一首）
+                    val own = song.source.trim().lowercase()
+                    if (own.isNotBlank() && song.id.isNotBlank()) {
+                        val u0 = kotlinx.coroutines.withTimeoutOrNull(PLAY_FAST_TIMEOUT_MS) {
+                            runCatching { MusicApiClient.resolveSongUrl(song.id, own) }.getOrNull()
+                        }
+                        if (!u0.isNullOrBlank() && u0.startsWith("http")) return@run u0
+                    }
+                    // ② 免费音源优先：酷我 / 咪咕 / B站 的免费曲库命中率最高，
                     // 放最前面能让能放的歌一秒出声，不用先绕一圈 VIP 源。
                     val keys = listOf("kuwo", "migu", "bilibili", song.source, sourceKey, "netease", "qq", "kugou")
                         .filter { it.isNotBlank() }.distinct()
                     for (k in keys) {
-                        // 单个音源最多等 6 秒：之前每源都可能拖十几秒，
+                        // 单个音源最多等 8 秒：之前每源都可能拖十几秒，
                         // 8 个源串下来就是"点了半天没反应、多点几次也一样"。
-                        val u = kotlinx.coroutines.withTimeoutOrNull(6_000) {
+                        val u = kotlinx.coroutines.withTimeoutOrNull(PLAY_STRICT_TIMEOUT_MS) {
                             runCatching {
-                                MusicApiClient.resolveSongUrlByName(song.id, song.name, song.artist, k)
+                                MusicApiClient.resolveSongUrlByName(song.id, song.name, song.artist, k, song.duration)
                             }.getOrNull()
                         }
                         if (!u.isNullOrBlank() && u.startsWith("http")) return@run u
                     }
-                    apiService.getFallbackUrl(song.id)
+                    // 关键：这个兜底是网易云的 outer 接口，只能拿网易云自己的 id 用。
+                    // 其他平台（B站/酷我/酷狗…）的 id 丢进去，网易云会返回"同 id 的另一首歌"，
+                    // 于是歌名/封面/歌词都对、声音却完全不是那首歌。
+                    if (song.source.equals("netease", ignoreCase = true)) {
+                        apiService.getFallbackUrl(song.id)
+                    } else {
+                        throw IllegalStateException("NO_FREE_SOURCE")
+                    }
                 }
+                // 与 playSong 统一：歌词走 loadLyricsFor（带归属校验，避免串词），
+                // 与直链解析并行、不阻塞；回填前用「当前歌 id」守卫，防止慢响应回来串词。
                 viewModelScope.launch {
-                    try {
-                        val keys = listOf(sourceKey, "netease", "qq", "kugou").filter { it.isNotBlank() }.distinct()
-                        for (k in keys) {
-                            val r = apiService.fetchLyricsExternal(getApplication(), song.id, k)
-                            val ld = r.getOrNull()
-                            if (ld != null && ld.lyrics.isNotEmpty()) {
-                                _currentLyrics.value = ld
-                                break
-                            }
-                        }
-                    } catch (_: Exception) { }
+                    loadLyricsFor(song, sourceKey)?.let { ld ->
+                        if (_currentSong.value?.id == song.id) _currentLyrics.value = ld
+                    }
                 }
+                updateMediaMetadata(song)
                 mediaPlayer = MediaPlayer().apply {
                     setAudioAttributes(
                         AudioAttributes.Builder()
@@ -1105,12 +1355,19 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     setOnPreparedListener { mp ->
                         applyPendingSeek(mp)
+                        android.util.Log.i(
+                            "MINova-Play",
+                            "ready to play in " + (System.currentTimeMillis() - playStartedAt) + "ms (playlist) song=" + song.name
+                        )
                         mp.start()
                         playFailStreak = 0
                         _isPlaying.value = true
                         _duration.value = mp.duration.toLong()
                         startProgressTracking()
                         updateMediaSession(true)
+                        // 起播成功：试听计数归零，并预解析「下一首」直链（自动切歌零等待）
+                        previewRetryCount = 0
+                        prefetchNext(song)
                     }
                     setOnCompletionListener { if (!_isLooping.value) playNext() }
                     setOnErrorListener { player, _, _ ->
@@ -1135,7 +1392,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 // 切歌时上个协程被取消属正常流程，不能当播放失败提示
                 throw e
             } catch (e: Exception) {
-                _toastMessage.value = "播放失败：" + (e.message ?: "未知错误")
+                _toastMessage.value = if (e.message == "NO_FREE_SOURCE")
+                    "这首在免费音源里没找到，已跳过"
+                else "播放失败：" + (e.message ?: "未知错误")
                 _isPlaying.value = false
             }
         }
@@ -1145,18 +1404,202 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var playSources: List<String> = listOf("qq", "kugou", "bilibili", "netease")
     private var playSourceIndex = 0
 
+    /** 「同源同 id」快路径是否已试过：换源时不要重复打同一个源。 */
+    private var ownSourceTried = false
+
     /**
-     * 依次取下一个音源的播放地址；用尽返回 null。
+     * 实测「prepare 快」的 CDN：kuwo / kugou / migu / bilibili 的直链 0.4~1.4 秒就能出声；
+     * 而网易云直链（m701.music.126.net）在模拟器上稳定 31~32 秒才 onPrepared。
+     * 因此：① 同源同 id 快路径只对这几个源用；② 网易云的歌优先走**跨源严格搜索**（kuwo/kugou 在前），
+     * 只有跨源都找不到时才退回它自己的直链。
+     */
+    private val FAST_CDN_SOURCES = setOf("kuwo", "kugou", "migu", "bilibili")
+
+    /** 最近一次成功解析实际命中的源（日志用；区别于 song.source） */
+    private var lastResolvedSource: String = ""
+
+    /** 预缓冲用的临时播放器：只 prepare 不 start，把 DNS/TLS/CDN 连接与首段缓冲先热起来。 */
+    private var warmUpPlayer: MediaPlayer? = null
+
+    /**
+     * 「当前这首歌」的试听重试次数。
+     *
+     * 必须独立于 [playSourceIndex]：之前试听判定条件用的是 playSourceIndex，
+     * 而解析走的是 for 循环不推进它 → 同一个源反复 startPrepare → onPrepared → 还是试听，
+     * 静默死循环（表现为「点了没反应、一直不出声」）。每首歌起播时归零。
+     */
+    private var previewRetryCount = 0
+
+    /** 「点歌」时刻（ms）：日志用，证明起播链路没有串行等待（tag = MINova-Play） */
+    private var playStartedAt = 0L
+
+    /** 下一首直链预解析缓存：key = id|source。自动切歌直接命中，消除「要等很久」。 */
+    private data class PrefetchedPlay(val url: String, val source: String, val at: Long)
+    private val prefetchedPlays = java.util.concurrent.ConcurrentHashMap<String, PrefetchedPlay>()
+    private var prefetchJob: Job? = null
+
+    private fun prefetchKey(s: Song): String = s.id + "|" + s.source.lowercase()
+
+    /** 取预解析结果：过期（[PREFETCH_TTL_MS]）或非 http 一律作废。 */
+    private fun takePrefetched(song: Song): PrefetchedPlay? {
+        val p = prefetchedPlays.remove(prefetchKey(song)) ?: return null
+        if (System.currentTimeMillis() - p.at > PREFETCH_TTL_MS) return null
+        val hit = p.takeIf { it.url.startsWith("http") }
+        android.util.Log.i("MINova-Play", "prefetch " + (if (hit != null) "HIT" else "MISS") +
+            " key=" + prefetchKey(song) + " src=" + (hit?.source ?: "-"))
+        return hit
+    }
+
+    /** 当前这轮播放的队列：显式队列 → 页面兜底队列 → 搜索结果。 */
+    private fun currentQueue(): List<Song> =
+        _playQueue.value.ifEmpty { _fallbackQueue.value }.ifEmpty { _searchResults.value }
+
+    /** 队列里的下一首（取法与 [playNext] 完全一致）。 */
+    private fun nextInQueue(cur: Song): Song? {
+        val q = currentQueue()
+        if (q.size < 2) return null
+        val i = q.indexOfFirst { it.id == cur.id }
+        return (if (i >= 0) q[(i + 1) % q.size] else q.firstOrNull())?.takeIf { it.id != cur.id }
+    }
+
+    /**
+     * 预解析**下一首**的直链并缓存：当前歌一出声就发起。
+     * 自动切歌时先查缓存 → 直接开播，不用再等网络（「自动切歌要等很久」的根治办法）。
+     * 失败/超时静默忽略：这只是优化，自动切歌仍有正常解析兜底。
+     */
+    private fun prefetchNext(cur: Song) {
+        val next = nextInQueue(cur) ?: return
+        val key = prefetchKey(next)
+        if (prefetchedPlays.containsKey(key)) return
+        prefetchJob?.cancel()
+        prefetchJob = viewModelScope.launch {
+            val own = next.source.trim().lowercase()
+            var src = own
+            var url: String? = null
+            // ① 只有"快 CDN"才直接用同源同 id；网易云这类慢源留给下面的跨源严格搜索
+            if (own in FAST_CDN_SOURCES && next.id.isNotBlank()) {
+                url = kotlinx.coroutines.withTimeoutOrNull(PLAY_FAST_TIMEOUT_MS) {
+                    runCatching { MusicApiClient.resolveSongUrl(next.id, own) }.getOrNull()
+                }
+            }
+            // ② 跨源严格搜索（kuwo/kugou 在前；歌名归一化相等 + 歌手交集或一方为空 + 时长差 ≤3s）
+            if (url.isNullOrBlank()) {
+                val rp = kotlinx.coroutines.withTimeoutOrNull(PLAY_STRICT_TOTAL_BUDGET_MS) {
+                    runCatching {
+                        MusicApiClient.resolveOrigin(next.id, next.name, next.artist, next.source, next.duration)
+                    }.getOrNull()
+                }
+                if (rp != null) { url = rp.url; src = rp.source }
+            }
+            // ③ 最后手段：慢源自己的直链（跨源确实找不到时才用，避免"整首放不出来"）
+            if (url.isNullOrBlank() && own.isNotBlank() && next.id.isNotBlank()) {
+                url = kotlinx.coroutines.withTimeoutOrNull(PLAY_FAST_TIMEOUT_MS) {
+                    runCatching { MusicApiClient.resolveSongUrl(next.id, own) }.getOrNull()
+                }
+                if (!url.isNullOrBlank()) src = own
+            }
+            val u = url
+            if (!u.isNullOrBlank() && u.startsWith("http")) {
+                if (prefetchedPlays.size > 6) prefetchedPlays.clear()
+                prefetchedPlays[key] = PrefetchedPlay(u, src, System.currentTimeMillis())
+                android.util.Log.i(
+                    "MINova-Play",
+                    "prefetched next src=" + src + " fastCdn=" + (src in FAST_CDN_SOURCES) + " song=" + next.name
+                )
+                // 预缓冲：只 prepare 不 start，把这条 URL 的连接 / 首段数据先热好（慢源不预热，省流量）
+                if (src in FAST_CDN_SOURCES) warmUpUrl(next, u)
+            }
+        }
+    }
+
+    /**
+     * 预缓冲下一首（不只是预解析 URL）：起一个**临时** MediaPlayer 只做 prepareAsync，
+     * 不 start、不出声，让 CDN 连接 / DNS / TLS / 首段数据先落到本地缓冲；
+     * 切歌时真正的播放器再 prepare 就会快很多（CDN 边缘与连接已热）。
+     * prepare 完成或出错立刻 release —— 它是独立实例，不参与真正播放器的状态机。
+     */
+    private fun warmUpUrl(song: Song, url: String) {
+        runCatching {
+            warmUpPlayer?.let { runCatching { it.release() } }
+            warmUpPlayer = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+                setOnPreparedListener { mp ->
+                    android.util.Log.i("MINova-Play", "warmed up next (prepared) song=" + song.name)
+                    runCatching { mp.release() }
+                    if (warmUpPlayer === mp) warmUpPlayer = null
+                }
+                setOnErrorListener { mp, _, _ ->
+                    runCatching { mp.release() }
+                    if (warmUpPlayer === mp) warmUpPlayer = null
+                    true
+                }
+                setDataSource(url)
+                prepareAsync()
+            }
+        }
+    }
+
+    /**
+     * 取下一个音源的播放地址；用尽返回 null。
      * 为什么要换源：netease 对 VIP/版权歌常返回 45 秒试听片段，
      * 必须等 MediaPlayer 报出真实时长后再判断，短了就换源。
+     *
+     * 顺序按「多快能出声」排，而不是按"哪个 id 最可信"排：
+     *  ① **快 CDN** 的「同源同 id」直取（一次请求，通常 <1s）；
+     *  ② 跨源严格搜索，源顺序 = [playSources]（kuwo/kugou 在前、网易云在最后），整段有总预算；
+     *  ③ 最后手段：慢源（网易云）自己的直链 —— prepare 慢，但总比"放不出来"好。
+     * ② 必须推进 [playSourceIndex]：试听换源要靠它继续往后走，否则会一直重试同一个源。
      */
     private suspend fun resolveNextPlayUrl(song: Song): String? {
-        while (playSourceIndex < playSources.size) {
-            val k = playSources[playSourceIndex++]
-            val u = runCatching {
-                MusicApiClient.resolveSongUrlByName(song.id, song.name, song.artist, k)
-            }.getOrNull()
-            if (!u.isNullOrBlank() && u.startsWith("http")) return u
+        val own = song.source.trim().lowercase()
+        // ① 只有快 CDN 才值得用同源同 id 直取（网易云直链实测要 31~32s 才出声）
+        if (!ownSourceTried && own in FAST_CDN_SOURCES) {
+            ownSourceTried = true
+            resolveOwnSourceUrl(song, own)?.let { return it }
+        }
+        // ② 跨源严格搜索：逐源推进索引，带上时长指纹；整段有**总预算**（不会串成几十秒）
+        val strict = kotlinx.coroutines.withTimeoutOrNull(PLAY_STRICT_TOTAL_BUDGET_MS) {
+            while (playSourceIndex < playSources.size) {
+                val k = playSources[playSourceIndex++]
+                val u = kotlinx.coroutines.withTimeoutOrNull(PLAY_STRICT_TIMEOUT_MS) {
+                    runCatching {
+                        MusicApiClient.resolveSongUrlByName(song.id, song.name, song.artist, k, song.duration)
+                    }.getOrNull()
+                }
+                if (!u.isNullOrBlank() && u.startsWith("http")) {
+                    lastResolvedSource = k
+                    return@withTimeoutOrNull u
+                }
+            }
+            null
+        }
+        if (!strict.isNullOrBlank()) return strict
+        // ③ 最后手段：慢源自己的直链（跨源确实找不到时才用）
+        if (!ownSourceTried) {
+            ownSourceTried = true
+            resolveOwnSourceUrl(song, own)?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * 同源同 id 直取：[MusicApiClient.resolveSongUrl] 一次 HTTP 拿地址，
+     * 不按关键词搜索（比 resolveSongUrlByName 快好几倍）。同平台同 id 必然是同一首歌。
+     */
+    private suspend fun resolveOwnSourceUrl(song: Song, own: String): String? {
+        if (own.isBlank() || song.id.isBlank()) return null
+        val u = kotlinx.coroutines.withTimeoutOrNull(PLAY_FAST_TIMEOUT_MS) {
+            runCatching { MusicApiClient.resolveSongUrl(song.id, own) }.getOrNull()
+        }
+        if (!u.isNullOrBlank() && u.startsWith("http")) {
+            lastResolvedSource = own
+            android.util.Log.i("MINova-Play", "resolved via own-source src=" + own + " song=" + song.name)
+            return u
         }
         return null
     }
@@ -1175,12 +1618,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
      * 另外部分源（kuwo/migu）会把罗马音/翻译当主歌词返回（表现为拼音/英文），
      * 所以拿到歌词后做一次归属校验：[ar:] 与歌手对不上、且正文几乎全 ASCII → 判定为别人的词，丢弃。
      */
-    private suspend fun loadLyricsFor(song: Song): LyricData? {
-        val src = song.source.ifBlank { "netease" }.lowercase()
+    private suspend fun loadLyricsFor(song: Song, sourceHint: String = ""): LyricData? {
+        // sourceHint：调用方知道这首歌实际来自哪个平台时优先用它（歌单里点的歌 song.source 可能为空）
+        val src = sourceHint.ifBlank { song.source }.ifBlank { "netease" }.lowercase()
         val tried = linkedSetOf(src, "kuwo", "migu", "netease")
         for (s in tried) {
             val ld = runCatching {
-                apiService.fetchLyricsExternal(getApplication(), song.id, s).getOrNull()
+                kotlinx.coroutines.withTimeoutOrNull(6000) {
+                    apiService.fetchLyricsExternal(getApplication(), song.id, s).getOrNull()
+                }
             }.getOrNull()
             if (ld != null && ld.lyrics.isNotEmpty() && lyricsBelongTo(ld, song)) return ld
             // 只有 netease 源才回落旧的网易直连接口（id 是 netease 语义）
@@ -1197,7 +1643,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val firstLines = ld.lyrics.entries.sortedBy { it.key }.take(12).map { it.value }.joinToString("\n")
         val arTag = Regex("\\[ar:([^\\]]+)\\]", RegexOption.IGNORE_CASE).find(firstLines)?.groupValues?.get(1)?.trim()
         val body = ld.lyrics.values.joinToString("\n")
-        val cjk = body.count { it.code in 0x4E00..0x9FFF }
+        val cjk = body.count { isNativeText(it) }
         val asciiLetters = body.count { it.isLetter() && it.code < 0x80 }
         val asciiDominant = asciiLetters > 0 && asciiLetters > cjk * 3
         fun norm(t: String) = t.lowercase().replace(Regex("\\s|[（）()\\[\\]【】·・.]"), "")
@@ -1209,8 +1655,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playSong(song: Song, queue: List<Song>? = null) {
-        // 记住这轮播放来自哪个列表，供自动切歌使用
-        if (!queue.isNullOrEmpty()) _playQueue.value = queue
+        playStartedAt = System.currentTimeMillis()
+        // 记住这轮播放来自哪个列表，供自动切歌使用。
+        // 队列真的换了 → 预解析缓存作废（缓存是按「当前队列的下一首」算出来的）。
+        if (!queue.isNullOrEmpty() && _playQueue.value != queue) {
+            _playQueue.value = queue
+            prefetchedPlays.clear()
+        }
         // 去重：连续点同一首歌时不要重建播放器 —— 否则会多次起播/叠音。
         // 播放中 → 直接忽略；暂停中 → 继续播放。
         if (_currentSong.value?.id == song.id) {
@@ -1230,11 +1681,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _duration.value = song.duration * 1000L
         _currentLyrics.value = LyricData()
         _currentLyricIndex.value = -1
+        // 试听重试计数只对「当前这首歌」生效：每首歌起播归零
+        previewRetryCount = 0
         playJob?.cancel()
         playJob = viewModelScope.launch {
             releasePlayer()
             // 历史异步写入，不阻塞播放启动
             launch(Dispatchers.IO) { runCatching { addPlayHistory(song) } }
+            // ── 自动切歌与手动点播共用这一条加载流程 ──
+            // 歌词 + 通知栏元数据与直链解析**并行**发起，互不阻塞：
+            // 之前这两件事排在直链解析之后，解析一慢/一失败就永远不执行 →「自动切到下一首后
+            // UI 已经换了新歌，却没声音也没歌词，手动点一下播放才补上」。
+            // 回填前用「当前歌 id 是否仍是这首歌」守卫，防止慢请求回来后串词。
+            launch {
+                loadLyricsFor(song)?.let { ld ->
+                    if (_currentSong.value?.id == song.id) _currentLyrics.value = ld
+                }
+            }
+            updateMediaMetadata(song)
             val isLoggedInAndHasQuota = _isLoggedIn.value && _remainingQuota.value > 0
             mediaPlayer = MediaPlayer().apply {
                 setAudioAttributes(
@@ -1250,7 +1714,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     // 试听片段检测：真实时长明显短于歌曲原长（如 VIP 歌 45 秒试听）→ 自动换下一个源
                     val expectMs = if (expect > 0L) expect * 1000L else 0L   // song.duration 是秒，mp.duration 是毫秒
                     val isPreview = if (expectMs > 0L) actual < expectMs * 6 / 10 else actual in 1L..75_000L
-                    if (actual > 0L && isPreview && playSourceIndex < playSources.size) {
+                    // 试听片段：用**独立计数**判断还能不能重试（最多 PREVIEW_RETRY_LIMIT 次）。
+                    // 之前这里用的是 playSourceIndex，而解析循环不推进它 → 同一个源反复
+                    // startPrepare→onPrepared→还是试听，静默死循环（表现为「点了没反应、一直不出声」）。
+                    if (actual > 0L && isPreview && previewRetryCount < PREVIEW_RETRY_LIMIT) {
+                        previewRetryCount++
                         viewModelScope.launch {
                             val next = resolveNextPlayUrl(song)
                             val okNext = next != null && startPrepare(next)
@@ -1265,12 +1733,26 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         }
                         return@setOnPreparedListener
                     }
+                    // 重试到上限仍只拿到试听片段 → 跳到下一首并提示，绝不再原地重试
+                    if (actual > 0L && isPreview) {
+                        _toastMessage.value = "该歌曲为会员专享，当前音源仅提供约 ${actual / 1000} 秒试听，已跳过"
+                        _isPlaying.value = false
+                        playNext()
+                        return@setOnPreparedListener
+                    }
                         // 单位修复后仍可能是试听：四个源都用尽却只拿到短片段，说明服务端 Cookie 对该曲无权限，                         // 明确提示用户，避免误以为「客户端又坏了 / 又只能听 30 秒」。                         if (actual > 0L && isPreview && playSourceIndex >= playSources.size) {                             _toastMessage.value = "该歌曲为会员专享，当前音源仅提供约 ${actual / 1000} 秒试听"                         }
+                    android.util.Log.i(
+                        "MINova-Play",
+                        "ready to play in " + (System.currentTimeMillis() - playStartedAt) + "ms song=" + song.name
+                    )
                     mp.start()
                     _isPlaying.value = true
                     _duration.value = actual
                     startProgressTracking()
                     updateMediaSession(true)
+                    // 拿到完整版：计数归零，并为「下一首」预解析直链（自动切歌零等待）
+                    previewRetryCount = 0
+                    prefetchNext(song)
                 }
                 setOnCompletionListener {
                     if (!_isLooping.value) playNext()
@@ -1282,6 +1764,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 setOnErrorListener { player, _, _ ->
                     player.reset()
+                    // 网易云的 outer 接口只能用网易云自己的 id。
+                    // 别的平台（B站/酷我/酷狗…）的 id 丢进去，网易云会返回"同 id 的另一首歌"，
+                    // 于是歌名/封面/歌词都对、声音却完全是另一首歌。非网易云一律跳过。
+                    if (!song.source.equals("netease", ignoreCase = true)) {
+                        _toastMessage.value = "这首在免费音源里没找到，已跳过"
+                        _isPlaying.value = false
+                        playNext()
+                        return@setOnErrorListener true
+                    }
                     try {
                         player.setDataSource(apiService.getFallbackUrl(song.id))
                         player.prepareAsync()
@@ -1298,9 +1789,29 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             // 因此这里把自建 API 的四个源放在前面，getFallbackUrl 只作为最后兜底。
             // 另外：某些源对特定歌也只给试听片段，所以真正的判定放在 onPrepared 里按真实时长校验。
             playSourceIndex = 0
-            playSources = listOf("kuwo", "migu", "bilibili", "netease", "qq", "kugou")
-            val firstUrl = resolveNextPlayUrl(song) ?: apiService.getFallbackUrl(song.id)
-            val ok = startPrepare(firstUrl)
+            ownSourceTried = false
+            // 源顺序 = 实测速度顺序：kuwo/kugou 先（prepare 亚秒级），网易云最后（31~32s）
+            playSources = listOf("kuwo", "kugou", "migu", "bilibili", "qq", "netease")
+            // 优先用「上一首播放时预解析的下一首直链」：自动切歌零等待
+            val cached = takePrefetched(song)
+            if (cached != null) {
+                // 缓存已经覆盖了这个源，换源时跳过它，避免拿同一个试听片段反复重试
+                playSources = playSources.filter { it != cached.source.lowercase() }
+                ownSourceTried = true
+            }
+            // 同上：非网易云绝不用网易云 outer 兜底，宁可判为"没找到"
+            val firstUrl = cached?.url
+                ?: resolveNextPlayUrl(song)
+                ?: if (song.source.equals("netease", ignoreCase = true)) apiService.getFallbackUrl(song.id) else ""
+            // 起播链路计时：cached=true 表示用的是上一首播放时预解析好的直链（0 网络等待）
+            android.util.Log.i(
+                "MINova-Play",
+                "url ready in " + (System.currentTimeMillis() - playStartedAt) + "ms cached=" + (cached != null) +
+                    " used=" + (if (cached != null) cached.source else lastResolvedSource) +
+                    " origin=" + song.source + " song=" + song.name
+            )
+            val ok = firstUrl.isNotBlank() && startPrepare(firstUrl)
+            if (firstUrl.isBlank()) _toastMessage.value = "这首在免费音源里没找到，已跳过"
             if (!ok) {
                 _toastMessage.value = "播放失败，该歌曲可能受版权限制"
                 _isPlaying.value = false
@@ -1308,8 +1819,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 if (_remainingQuota.value > 0) useQuota()
                 else _toastMessage.value = "额度已用完，请观看广告获取额度"
             }
-            loadLyricsFor(song)?.let { _currentLyrics.value = it }
-            updateMediaMetadata(song)
+            // 歌词与通知元数据已在本协程开头与直链解析并行发起（见上），此处不再串行等待
         }
     }
 
@@ -1611,6 +2121,78 @@ fun watchAd(activity: android.app.Activity) {
         }
     }
 
+    // ── 收藏的本地缓存 ─────────────────────────────────────────────
+    /**
+     * 把当前收藏落盘。作用：
+     *  ① 未登录也能收藏（不再直接弹"请先登录"）；
+     *  ② 离线/进程被杀/重启后立刻有内容，不必等服务端；
+     *  ③ 登录时可把"服务端没有的本地条目"补传上去（见 [loadFavorites]）。
+     */
+    private fun saveFavoritesCache() {
+        try {
+            val arr = org.json.JSONArray()
+            _favorites.value.forEach { s ->
+                arr.put(
+                    JSONObject()
+                        .put("id", s.id).put("name", s.name).put("artist", s.artist)
+                        .put("album", s.album).put("duration", s.duration).put("picUrl", s.picUrl)
+                )
+            }
+            favoritesFile.writeText(arr.toString())
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 启动时先读本地缓存，保证收藏页不空。 */
+    private fun loadFavoritesCache() {
+        try {
+            if (!favoritesFile.exists()) return
+            val arr = org.json.JSONArray(favoritesFile.readText())
+            val list = mutableListOf<Song>()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optString("id")
+                if (id.isBlank()) continue
+                list.add(
+                    Song(
+                        id = id, name = o.optString("name"), artist = o.optString("artist"),
+                        album = o.optString("album"), duration = o.optLong("duration"),
+                        picUrl = o.optString("picUrl")
+                    )
+                )
+            }
+            if (list.isNotEmpty()) _favorites.value = list
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 单条收藏上报服务端；成功返回 true。未登录调用返回 false。 */
+    private suspend fun pushFavoriteToServer(song: Song): Boolean {
+        if (authToken.isBlank()) return false
+        return try {
+            val json = JSONObject().apply {
+                put("song_id", song.id); put("song_name", song.name)
+                put("artist", song.artist); put("cover_url", song.picUrl)
+            }
+            val conn = URL("${API_BASE_URL}/api/v1/favorites").openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("Authorization", "Bearer $authToken")
+            conn.doOutput = true
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            conn.outputStream.use { it.write(json.toString().toByteArray()) }
+            val code = conn.responseCode
+            conn.disconnect()
+            code in 200..299
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** 从本地缓存里恢复收藏（启动即显示），未登录时这是唯一来源。 */
+    fun restoreLocalFavorites() = loadFavoritesCache()
+
     fun loadFavorites() {
         if (!_isLoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) {
@@ -1644,7 +2226,14 @@ fun watchAd(activity: android.app.Activity) {
                     val item = array.getJSONObject(i)
                     list.add(Song(id = item.getString("song_id"), name = item.optString("song_name", item.optString("name", "")), artist = item.optString("artist", ""), album = item.optString("album", ""), duration = item.optLong("duration", 0), picUrl = item.optString("cover_url", item.optString("pic_url", ""))))
                 }
-                _favorites.value = list
+                // 服务端收藏是「删除应用重装 / 换机后」的唯一来源（本地文件随卸载消失）。
+                // 本地缓存里服务端还没有的条目（离线收藏、未登录期间收藏）先补传，再取并集
+                // —— 登录后两边都不会丢，也不会把服务端已有的收藏清掉。
+                val serverIds = list.map { it.id }.toHashSet()
+                val localOnly = _favorites.value.filter { it.id !in serverIds }
+                localOnly.forEach { s -> runCatching { pushFavoriteToServer(s) } }
+                _favorites.value = (list + localOnly).distinctBy { it.id }
+                saveFavoritesCache()
             } catch (e: Exception) {
                 android.util.Log.e("MINova", "loadFavorites error", e)
                 withContext(Dispatchers.Main) { _toastMessage.value = "收藏加载失败: ${e.message}" }
@@ -1652,9 +2241,47 @@ fun watchAd(activity: android.app.Activity) {
         }
     }
 
-    fun addToFavorites(song: Song) { if (!_isLoggedIn.value) { _toastMessage.value = "请先登录"; return }; if (_favorites.value.any { it.id == song.id }) { _toastMessage.value = "已收藏过此歌曲"; return }; viewModelScope.launch(Dispatchers.IO) { try { val json = JSONObject().apply { put("song_id", song.id); put("song_name", song.name); put("artist", song.artist); put("cover_url", song.picUrl) }; val conn = URL("${API_BASE_URL}/api/v1/favorites").openConnection() as HttpURLConnection; conn.requestMethod = "POST"; conn.setRequestProperty("Content-Type", "application/json"); conn.setRequestProperty("Authorization", "Bearer $authToken"); conn.doOutput = true; conn.connectTimeout = 10000; conn.readTimeout = 10000; conn.outputStream.use { it.write(json.toString().toByteArray()) }; if (conn.responseCode == 200) { val updatedList = _favorites.value.toMutableList(); updatedList.add(0, song); _favorites.value = updatedList; withContext(Dispatchers.Main) { _toastMessage.value = "已添加到收藏" } } else { val errorText = conn.errorStream?.bufferedReader()?.readText() ?: ""; withContext(Dispatchers.Main) { _toastMessage.value = "收藏失败: $errorText" } }; conn.disconnect() } catch (e: Exception) { withContext(Dispatchers.Main) { _toastMessage.value = "网络异常: ${e.message}" } } } }
+    fun addToFavorites(song: Song) {
+        if (_favorites.value.any { it.id == song.id }) { _toastMessage.value = "已收藏过此歌曲"; return }
+        // 先落本地：未登录 / 离线也能收藏，重启不丢；登录后 loadFavorites 会把本地新增的补传到服务端
+        _favorites.value = listOf(song) + _favorites.value
+        saveFavoritesCache()
+        if (!_isLoggedIn.value || authToken.isBlank()) {
+            _toastMessage.value = "已收藏（本地）"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching { pushFavoriteToServer(song) }.getOrDefault(false)
+            withContext(Dispatchers.Main) {
+                _toastMessage.value = if (ok) "已添加到收藏" else "已收藏（本地），云端同步稍后重试"
+            }
+        }
+    }
 
-    fun removeFromFavorites(songId: String) { viewModelScope.launch(Dispatchers.IO) { try { val encoded = java.net.URLEncoder.encode(songId, "UTF-8"); val conn = URL("${API_BASE_URL}/api/v1/favorites/$encoded").openConnection() as HttpURLConnection; conn.requestMethod = "DELETE"; conn.setRequestProperty("Authorization", "Bearer $authToken"); conn.connectTimeout = 10000; conn.readTimeout = 10000; val code = conn.responseCode; val ok = code in 200..299; conn.disconnect(); if (ok) { _favorites.value = _favorites.value.filter { it.id != songId }; withContext(Dispatchers.Main) { _toastMessage.value = "已取消收藏" } } else { withContext(Dispatchers.Main) { _toastMessage.value = "取消失败，请稍后重试" } } } catch (_: Exception) { withContext(Dispatchers.Main) { _toastMessage.value = "取消失败，请检查网络" } } } }
+    fun removeFromFavorites(songId: String) {
+        // 本地立刻生效（离线/未登录也一致），登录时再同步删除服务端
+        _favorites.value = _favorites.value.filter { it.id != songId }
+        saveFavoritesCache()
+        if (!_isLoggedIn.value || authToken.isBlank()) { _toastMessage.value = "已取消收藏"; return }
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = try {
+                val encoded = java.net.URLEncoder.encode(songId, "UTF-8")
+                val conn = URL("${API_BASE_URL}/api/v1/favorites/$encoded").openConnection() as HttpURLConnection
+                conn.requestMethod = "DELETE"
+                conn.setRequestProperty("Authorization", "Bearer $authToken")
+                conn.connectTimeout = 10000
+                conn.readTimeout = 10000
+                val code = conn.responseCode
+                conn.disconnect()
+                code in 200..299
+            } catch (_: Exception) {
+                false
+            }
+            withContext(Dispatchers.Main) {
+                _toastMessage.value = if (ok) "已取消收藏" else "已取消收藏（云端稍后同步）"
+            }
+        }
+    }
 
 fun loadHistory() {
         if (!_isLoggedIn.value) { _historyList.value = emptyList(); return }
@@ -1758,6 +2385,8 @@ private fun addPlayHistory(song: Song) {
         _searchHistory.value = loadHistoryFromFile().toMutableList()
         loadDownloadedSongs()
         loadPlayCounts()
+        // 收藏先读本地缓存（未登录/离线/刚启动也有内容）；登录后 loadFavorites() 再与服务端取并集
+        restoreLocalFavorites()
         if (!downloadDir.exists()) downloadDir.mkdirs()
         viewModelScope.launch(Dispatchers.IO) { try { MusicApiService.gsonInstance.fromJson("{}", SearchResponse::class.java); MusicApiService.LRC_REGEX.find("[00:00.00]warmup") } catch (_: Exception) {} }
         val pb = PlaybackStateCompat.Builder().setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_SEEK_TO)
@@ -2618,7 +3247,8 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
         }
 
         if (viewModel.isConsoleFullScreen && currentSong != null) {
-            FullScreenPlayer(
+            Box(modifier = Modifier.fillMaxSize()) {
+                    FullScreenPlayer(
                 currentSong = currentSong!!,
                 isPlaying = isPlaying,
                 isLooping = isLooping,
@@ -2648,6 +3278,7 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                     context.startActivity(android.content.Intent.createChooser(shareIntent, "分享"))
                 }
             )
+            }
         }
 
         AnimatedVisibility(
@@ -3116,9 +3747,16 @@ fun FullScreenPlayer(
                                     }
                                 }
                             }
+                        } else if (lyrics.times.isNotEmpty() || lyrics.lyrics.isNotEmpty()) {
+                            // 有歌词、只是还没唱到第一句（前奏/间奏）→ 不是"纯音乐"
+                            Text(
+                                "等待前奏…",
+                                color = Color.White.copy(alpha = 0.5f),
+                                fontSize = 14.sp
+                            )
                         } else {
                             Text(
-                                "纯音乐，请欣赏",
+                                if (lyrics.instrumental) "纯音乐，请欣赏" else "暂无歌词",
                                 color = Color.White.copy(alpha = 0.5f),
                                 fontSize = 14.sp
                             )
@@ -3296,7 +3934,7 @@ fun FullScreenPlayer(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    "纯音乐，请欣赏",
+                                    if (lyrics.instrumental) "纯音乐，请欣赏" else "暂无歌词",
                                     color = Color.White.copy(alpha = 0.4f),
                                     fontSize = 16.sp
                                 )
@@ -3692,6 +4330,32 @@ fun MusicSearchTab(
 
         val searchResultsPane: @Composable (Modifier) -> Unit = { resultModifier ->
 
+        // ⚠️ 顺序必须是**确定的**：多音源是并行 async 抓取后合并的（`async` 谁先返回谁先入表），
+        // 所以 searchResults 的原始顺序每次搜索都不一样。对随机顺序做 reversed() 依旧是随机顺序，
+        // 用户看到的还是"随缘分布、好歌在下面"。因此这里完全按**显式排序键**排，不依赖合并顺序：
+        //   ① 好版本优先（!isJunkVersion：歌手名里的 DJ / 翻唱 / 混音也认）
+        //   ② 来源优先级固定：kuwo > migu > kugou > qq > netease > bilibili
+        //   ③ 时长已知的优先
+        //   ④ 歌名更短优先（更接近原版标题）
+        //   ⑤ id + source 兜底 → 同一组搜索结果每次顺序完全一致
+        val sortedSearchResults = remember(searchResults) {
+            // 关键：**必须用稳定排序**（只按 垃圾版本 + 来源优先级 两个键），
+            // 这样每个音源返回结果**各自的相关度顺序会被保留** ——
+            // 各源都把最相关/最可能的原唱放在最前面，原唱因此会稳定排在前列。
+            // 之前额外加的「歌名更短」「id 兜底」会把这个顺序打乱，所以必须去掉。
+            val srcRank = mapOf(
+                "kuwo" to 0, "migu" to 1, "kugou" to 2, "qq" to 3, "netease" to 4,
+                "bilibili" to 5, "soda" to 6, "fivesing" to 7, "joox" to 8,
+                "jamendo" to 9, "qianqian" to 10
+            )
+            searchResults.sortedWith(
+                compareBy(
+                    { if (isJunkVersion(it)) 1 else 0 },
+                    { srcRank[it.source.lowercase()] ?: 11 }
+                )
+            )
+        }
+
         Box(modifier = resultModifier) {
             val targetState = when {
                 isSearching -> 0
@@ -3743,14 +4407,35 @@ fun MusicSearchTab(
                         }
                     }
                     3 -> {
+                        val moreState = rememberLazyListState()
+                        val moreNearBottom by remember {
+                            derivedStateOf {
+                                val info = moreState.layoutInfo
+                                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                                last >= info.totalItemsCount - 3
+                            }
+                        }
+                        val moreHas by viewModel.hasMoreSearch.collectAsState()
+                        val moreLoading by viewModel.isLoadingMore.collectAsState()
+                        // 使劲往上滑到底部 → 自动加载下一页（不需要点按钮）
+                        LaunchedEffect(moreNearBottom, moreHas, moreLoading) {
+                            if (moreNearBottom && moreHas && !moreLoading) viewModel.loadMoreSearch()
+                        }
                         LazyColumn(
+                            state = moreState,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             itemsIndexed(
-                                items = searchResults,
-                                key = { _, s -> s.id }
+                                items = sortedSearchResults,
+                                // 去重键带上版本标识后，同一首歌的多个版本会同时出现在列表里，
+                                // 只拿 id 当 key 可能撞车（LazyColumn 会直接崩）。这里用
+                                // id+来源+歌名/歌手/专辑，与上面的去重键一一对应。
+                                key = { _, s ->
+                                    listOf(s.id, s.source, s.name, s.artist, s.album)
+                                        .joinToString("\u0001").lowercase()
+                                }
                             ) { index, song ->
                                 SongItem(
                                     song = song,
@@ -3759,13 +4444,41 @@ fun MusicSearchTab(
                                     isCurrentSong = song.id == currentSong?.id,
                                     isPlaying = isPlaying,
                                     isFirst = index == 0,
-                                    isLast = index == searchResults.size - 1,
+                                    isLast = index == sortedSearchResults.size - 1,
                                     onClick = { viewModel.playSong(song) },
                                     viewModel = viewModel,
                                     backdrop = backdrop,
                                     isInFavorites = false,
                                     onRemoveFromFavorites = null
                                 )
+                            }
+                            // ── 加载更多：同一关键词请求下一页并追加到列表末尾 ──
+                            // 展示层是「整体倒序」，所以追加后新结果自动出现在列表最前面(?)——
+                            // 实际是按倒序规则统一渲染，顺序始终一致。
+                            item {
+                                val hasMoreSearch by viewModel.hasMoreSearch.collectAsState()
+                                val isLoadingMore by viewModel.isLoadingMore.collectAsState()
+                                Box(
+                                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                            .padding(horizontal = 20.dp, vertical = 9.dp)
+                                    ) {
+                                        Text(
+                                            when {
+                                                isLoadingMore -> "加载中…"
+                                                !hasMoreSearch -> "没有更多了"
+                                                else -> "加载更多"
+                                            },
+                                            fontSize = 13.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -3879,6 +4592,8 @@ fun SettingsThemeTab(
     var showFloatLyrics by remember { mutableStateOf(false) }
     // 音乐偏好入口：设置里随时可改（首启弹窗只在引导+风格选择完成后弹一次）
     var showTastePrefs by remember { mutableStateOf(false) }
+    // 「更新日志」入口已按用户要求挪到「账号」页（ProfileTab 的 更新日志 → ChangelogScreen），
+    // 设置页不再保留该入口；1.3.1 的条目由 changelogEntries() 统一提供。
 
     Column(
         modifier = Modifier
@@ -3903,21 +4618,21 @@ fun SettingsThemeTab(
                         KsuSegColumn {
                 val rememberLastOn by viewModel.rememberLast.collectAsState()
                 KsuSegClick(
-                    index = 0, count = 8,
+                    index = 0, count = 10,
                     icon = Icons.Outlined.Image,
                     title = "主题与个性化",
                     summary = "此风格暂不支持自定义壁纸",
                     onClick = onNavigateToCustomCenter
                 )
                 KsuSegClick(
-                    index = 1, count = 8,
+                    index = 1, count = 10,
                     icon = Icons.Rounded.Palette,
                     title = "主题与颜色",
                     summary = "可调整应用内大部分的主题设置与风格",
                     onClick = onNavigateToColorPalette
                 )
                 KsuSegSwitch(
-                    index = 2, count = 8,
+                    index = 2, count = 10,
                     icon = if (viewModel.isForceDarkMode) Icons.Rounded.DarkMode else Icons.Rounded.LightMode,
                     title = "暗色模式",
                     summary = "强制使用深色界面",
@@ -3928,7 +4643,7 @@ fun SettingsThemeTab(
                     }
                 )
             KsuSegSwitch(
-                        index = 3, count = 8,
+                        index = 3, count = 10,
                         icon = Icons.Rounded.FormatColorText,
                         title = "文字变白",
                         summary = "仅文字转白，图标保持主题色，对抗暗色壁纸",
@@ -3939,7 +4654,7 @@ fun SettingsThemeTab(
                         }
                     )
                 KsuSegClick(
-                    index = 4, count = 8,
+                    index = 4, count = 10,
                     icon = Icons.Rounded.Lyrics,
                     title = "悬浮歌词（测试版）",
                     summary = "桌面歌词：可穿透、可调色、可调透明度",
@@ -3950,7 +4665,7 @@ fun SettingsThemeTab(
                 }
 
                 KsuSegSwitch(
-                    index = 5, count = 8,
+                    index = 5, count = 10,
                     icon = Icons.Rounded.MusicNote,
                     title = "波浪进度条",
                     summary = "进度条样式",
@@ -3961,7 +4676,7 @@ fun SettingsThemeTab(
                     }
                 )
                 KsuSegClick(
-                    index = 6, count = 8,
+                    index = 6, count = 10,
                     icon = Icons.Rounded.Equalizer,
                     title = "音乐偏好",
                     summary = "音乐类型 · 关注艺人（参与推荐打分）",
@@ -3969,7 +4684,7 @@ fun SettingsThemeTab(
                 )
                 // 与「暗色模式」同样的卡片样式
                 KsuSegSwitch(
-                    index = 7, count = 9,
+                    index = 7, count = 10,
                     icon = Icons.Rounded.Restore,
                     title = "记住上次播放",
                     summary = "下次打开应用继续上次的歌与进度",
@@ -6643,25 +7358,8 @@ fun SongItem(
                             color = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        // 只在歌名里**确实带版本修饰**时才打标（Live / DJ版 / 翻唱 / 伴奏 / 纯音乐）。
-                        // 不能给"没有修饰"的一律标成原唱 —— 翻唱往往也没有修饰，
-                        // 那样会导致满屏都是"原唱"，反而误导。
-                        val versionTag = parseVersionTag(song.name, song.album)
-                        if (versionTag != null) {
-                            Spacer(Modifier.width(6.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(MaterialTheme.colorScheme.tertiaryContainer)
-                                    .padding(horizontal = 5.dp, vertical = 1.dp)
-                            ) {
-                                Text(
-                                    text = versionTag,
-                                    fontSize = 9.sp,
-                                    color = MaterialTheme.colorScheme.onTertiaryContainer
-                                )
-                            }
-                        }
+                        // 版本标签（原唱/翻唱/DJ版/Live/伴奏/纯音乐）已按用户要求**不再显示**：
+                        // 它经常标错，反而误导。parseVersionTag 仍保留，仅用于排序（sortSearchResults）。
                     }
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
@@ -6813,7 +7511,14 @@ fun MD3StyleBottomSheetConsole(
             val text = lyrics.lyrics[time] ?: ""
             val trans = lyrics.translations[time]
             if (!trans.isNullOrEmpty()) "$text\n$trans" else text
-        } else "享受纯净音乐"
+        } else if (lyrics.times.isNotEmpty() || lyrics.lyrics.isNotEmpty()) {
+            // 有歌词、只是还没唱到第一句（前奏/间奏）→ 不是"纯音乐"
+            "等待前奏…"
+        } else if (lyrics.instrumental) {
+            "纯音乐，请欣赏"
+        } else {
+            "暂无歌词"
+        }
     }
 
     val maxProgressValue = if (duration > 0) duration.toFloat() else 1f
@@ -6840,6 +7545,9 @@ fun MD3StyleBottomSheetConsole(
         label = "ProgressAlpha"
     )
 
+    // 容器圆角从 32dp 收到 24dp：76dp 高的胶囊配 32dp 圆角时，左右上下的圆角会"吃"进内容区，
+    // 歌名/歌手会被遮掉一点（用户反馈）。同时内容再加一层内缩，保证文字完整。
+    val consoleShape = RoundedCornerShape(24.dp)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -6847,10 +7555,10 @@ fun MD3StyleBottomSheetConsole(
             .height(consoleHeight)
             .then(
                 if (LocalMd3Style.current)
-                    Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedCornerShape(32.dp))
+                    Modifier.background(MaterialTheme.colorScheme.surfaceBright, consoleShape)
                 else Modifier.drawBackdrop(
                     backdrop = backdrop,
-                    shape = { RoundedCornerShape(32.dp) },
+                    shape = { consoleShape },
                     effects = {
                         val minDimension = size.minDimension
                         vibrancy()
@@ -6867,8 +7575,8 @@ fun MD3StyleBottomSheetConsole(
                     onDrawSurface = { }
                 )
             )
-            .clip(RoundedCornerShape(32.dp))
-            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .clip(consoleShape)
+            .padding(horizontal = 18.dp, vertical = 12.dp)
     ) {
         Column(
             modifier = Modifier.fillMaxSize(),
@@ -6900,7 +7608,12 @@ fun MD3StyleBottomSheetConsole(
                 Spacer(modifier = Modifier.width(12.dp))
 
                 Column(
-                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).clickable { onFullScreen() }
+                    // 标题块再内缩一点：圆角容器边缘不会压到歌名的首/末字
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onFullScreen() }
+                        .padding(start = 12.dp, end = 10.dp, top = 2.dp, bottom = 2.dp)
                 ) {
                     Text(
                         currentSong?.name ?: "",
@@ -7074,6 +7787,94 @@ fun MD3StyleBottomSheetConsole(
  * 之前列表直接把它当毫秒交给 formatDuration，于是整列都显示成 00:00。
  * 用一个阈值区分：<=10 小时按秒处理，否则视为已经是毫秒。
  */
+/**
+ * 搜索结果排序。
+ *
+ * mode: 0 原唱优先（默认） / 1 热度 / 2 时长 / 3 默认（保持原顺序）
+ *
+ * 「原唱优先」的有序键（从强到弱，全部显式给出 → 结果确定、与并行抓取的到达顺序无关）：
+ *  1) 版本修饰：parseVersionTag == null → 0，否则 1（无 DJ版/Live/翻唱/伴奏/纯音乐 的在前）
+ *  2) 艺人命中：搜索词里包含该结果的歌手名 → 0，否则 1（用户可能在找这个歌手）
+ *  3) 时长有效性：duration > 0 → 0，否则 1（0/未知通常是残缺项）
+ *  4) 来源优先级：kuwo > migu > kugou > qq > netease > bilibili
+ *  5) 热度降序
+ *  6) 歌名更短（更接近原版标题）
+ *  7) id 兜底，保证完全确定性
+ *
+ * 注意：故意**不再**用"和搜索词完全同名"当第一键 —— 实测翻唱版常常直接沿用原歌名，
+ * 反而会被顶到原唱前面（用户反馈「好的歌永远只会在下面」）。
+ */
+/**
+ * 是不是"垃圾版本"（DJ版 / 翻唱 / 混音 / 加速降调 / Live / 伴奏 …）。
+ *
+ * 为什么不能只看歌名：中文平台大量垃圾版本的版本信息写在**歌手名**里，
+ * 例如 `虞兮叹 - 山河DJ`、`虞兮叹 - 混音太子`、`xxx - DJ阿智`。
+ * 它们的歌名干干净净，只按歌名判定就会被当成"正常版本"顶在最上面，
+ * 而真正的原唱被挤到最底下。所以歌手名也要拆词检查。
+ */
+fun isJunkVersion(song: Song): Boolean {
+    // 歌名/专辑：沿用 parseVersionTag（只在"版本标注可能出现的位置"匹配，不会误伤 Believe/Discovery）
+    if (parseVersionTag(song.name, song.album) != null) return true
+    val artist = song.artist.lowercase()
+    if (artist.isBlank()) return false
+    // 中文版本/演绎标记。注意**不能**放"古风/国风/空灵/小曲"这类曲风词：
+    // 它们是风格不是版本，歌手叫「古风XX」会被整体判成垃圾版本，反而把正常歌挤下去。
+    val junkCn = listOf(
+        "混音", "翻唱", "加速", "减速", "降调", "升调", "抖音", "铃声",
+        "伴奏", "纯音乐", "钢琴", "吉他", "童声", "女声版", "男声版",
+        "合唱", "清唱", "戏腔", "串烧", "改版", "改编", "组曲", "重制"
+    )
+    // 拉丁缩写必须按**词**匹配：之前的 t.contains("dj") 会把 Adjoa 之类正常歌手误杀。
+    // 词首不能是字母/数字（山河DJ ✔、Adjoa ✘）；词尾允许数字（DJ2024 ✔）。
+    val junkWordRe = Regex("(?i)(?<![a-z0-9])(dj|remix|cover|sped|slowed|8d)(?![a-z])")
+    val tokens = artist.split('/', '、', '&', ',', '，', ';', '；', '-', '_', ' ', '·')
+        .map { it.trim() }.filter { it.isNotEmpty() }
+    return tokens.any { t -> junkCn.any { t.contains(it) } || junkWordRe.containsMatchIn(t) }
+}
+
+fun sortSearchResults(list: List<Song>, mode: Int, keyword: String = ""): List<Song> {
+    if (list.size <= 1) return list
+    val srcRank = mapOf(
+        "kuwo" to 0, "migu" to 1, "kugou" to 2, "qq" to 3, "netease" to 4, "bilibili" to 5
+    )
+    val kw = keyword.trim().lowercase()
+    // 搜索词里是否点名了这位歌手（歌手可能是 "A/B"、"A、B"、"A & B" 这种多值）。
+    fun artistHit(s: Song): Int {
+        if (kw.isBlank()) return 1
+        val hit = s.artist.split('/', '、', '&', ',', '，', ';', '；')
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .any { kw.contains(it) }
+        return if (hit) 0 else 1
+    }
+    return when (mode) {
+        1 -> list.sortedWith(compareByDescending<Song> { it.heat }.thenBy { it.id })
+        2 -> list.sortedWith(
+            compareBy<Song> { if (it.duration > 0) it.duration else Long.MAX_VALUE }.thenBy { it.id }
+        )
+        3 -> list
+        4 -> list.reversed()
+        else -> list.sortedWith(
+            compareBy(
+                // 1) 无版本修饰的更可能是原唱/正常版本
+                { if (!isJunkVersion(it)) 0 else 1 },
+                // 2) 搜索词点名的歌手优先
+                { artistHit(it) },
+                // 3) 时长已知的优先
+                { if (it.duration > 0) 0 else 1 },
+                // 4) 来源优先级（kuwo/咪咕/酷狗的华语原唱覆盖最好）
+                { srcRank[it.source.lowercase()] ?: 9 },
+                // 5) 热度降序
+                { -it.heat },
+                // 6) 歌名更短（越短越接近原版标题）
+                { it.name.length },
+                // 7) 最终兜底，保证排序完全确定
+                { it.id }
+            )
+        )
+    }
+}
+
 fun songDurationMillis(duration: Long): Long =
     if (duration in 1..36_000L) duration * 1000L else duration
 
@@ -7089,6 +7890,30 @@ fun rememberStableCover(picUrl: String): String {
     var lastCover by remember { mutableStateOf(picUrl) }
     if (picUrl.isNotEmpty()) lastCover = picUrl
     return picUrl.ifEmpty { lastCover }
+}
+
+/**
+ * 是不是"原文文字"。
+ *
+ * 之前只按 CJK 汉字（0x4E00-0x9FFF）判断，导致**日文假名不算原文**：
+ * 日文歌的原文被当成"外来行"，罗马音反而胜出，歌词就变成了拼音。
+ * 这里把假名（平假名/片假名）和 CJK 扩展 A 一起算作原文。
+ *
+ * 韩文同理：Hangul 音节 / Jamo / 兼容字母 也必须算原文，
+ * 否则韩文歌会选到罗马音（RR）那一行。
+ * 所有「原文判定」的地方（歌词择优、歌词归属校验、罗马音过滤）都走这个函数，
+ * 因此只需在这里补齐区间即可全链路生效。
+ */
+internal fun isNativeText(ch: Char): Boolean {
+    val c = ch.code
+    return c in 0x4E00..0x9FFF ||   // CJK 汉字
+            c in 0x3400..0x4DBF ||  // CJK 扩展 A
+            c in 0x3040..0x309F ||  // 平假名
+            c in 0x30A0..0x30FF ||  // 片假名
+            c in 0xFF66..0xFF9F ||  // 半角片假名
+            c in 0xAC00..0xD7AF ||  // 韩文 Hangul 音节（가～힣）
+            c in 0x1100..0x11FF ||  // 韩文 Hangul Jamo（初声/中声/终声）
+            c in 0x3130..0x318F     // 韩文兼容字母（ㄱ～ㅎ）
 }
 
 fun formatDuration(millis: Long): String {
@@ -7511,6 +8336,16 @@ class MainActivity : ComponentActivity() {
             showStyleGuide = false
         }
 
+        // 停服维护检查：进入主界面立刻查一次，之后每 5 分钟轮询一次。
+        // 失败一律按正常处理（见 PlayerViewModel.checkMaintenance），绝不挡住使用。
+        LaunchedEffect(Unit) {
+            viewModel.checkMaintenance()
+            while (true) {
+                kotlinx.coroutines.delay(5 * 60 * 1000L)
+                viewModel.checkMaintenance()
+            }
+        }
+
         Box(modifier = Modifier.fillMaxSize()) {
                         Box(modifier = Modifier.fillMaxSize()) {
                 androidx.compose.runtime.CompositionLocalProvider(
@@ -7602,6 +8437,8 @@ class MainActivity : ComponentActivity() {
             // 拆成两个独立 LaunchedEffect 时它们会在同一帧一起触发、互相抢，导致更新把公告"顶掉"。
             LaunchedEffect(onboardingDone, viewModel.showAnnouncement, viewModel.showUpdate) {
                 if (!onboardingDone) return@LaunchedEffect
+                // 紧急停机（level >= 3）时不再自动弹公告 / 更新，避免盖在阻断页上面
+                if ((viewModel.maintenance.value?.level ?: 0) >= 3) return@LaunchedEffect
                 if (viewModel.showAnnouncement && viewModel.announcement.value != null) {
                     showAnnouncementSheet = true
                     return@LaunchedEffect
@@ -7665,6 +8502,39 @@ class MainActivity : ComponentActivity() {
                             }) { Text("我知道了") }
                         }
                         Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+
+            // ── 停服维护三档 UI（最上层）────────────────────────────────────
+            // level 1：顶部细横幅（只占一条，不挡操作，可关，会话内不再显示）
+            // level 2：居中弹窗（有关闭按钮 + 明显警告，可关，会话内不再显示）
+            // level 3：全屏阻断页（不可关闭、不可操作）
+            run {
+                val maintenanceInfo by viewModel.maintenance.collectAsState()
+                val ackedSignature by viewModel.maintenanceAcked.collectAsState()
+                val info = maintenanceInfo
+                if (info != null && info.level > 0) {
+                    // 展示样式：服务端 maintenance.json 里的 style 说了算；
+                    // 留空时按档位默认 —— level 1 = 顶部横幅，level >= 2 = 整屏维护页。
+                    val style = info.style.trim().lowercase()
+                    val wantBanner = style == "banner" || (style.isEmpty() && info.level == 1)
+                    val wantDialog = style == "dialog"
+                    when {
+                        // 紧急停机：永远整屏、不可关，直到服务端降档
+                        info.level >= 3 -> MaintenanceBlockScreen(info)
+                        // 重要维护：默认整屏页（可返回/可关），也可被 style 强制成横幅或弹窗
+                        wantBanner -> if (ackedSignature != info.signature()) {
+                            MaintenanceTopBanner(info) { viewModel.ackMaintenance(info) }
+                        }
+                        wantDialog -> if (ackedSignature != info.signature()) {
+                            MaintenanceNoticeDialog(info) { viewModel.ackMaintenance(info) }
+                        }
+                        else -> if (ackedSignature != info.signature()) {
+                            MaintenanceBlockScreen(info, dismissible = true) {
+                                viewModel.ackMaintenance(info)
+                            }
+                        }
                     }
                 }
             }
@@ -7838,6 +8708,281 @@ class MainActivity : ComponentActivity() {
     }
 }
 }
+}
+
+/* ============================================================================
+ *  停服维护三档 UI
+ *  level 1 = 顶部细横幅 / level 2 = 居中弹窗 / level 3 = 全屏阻断
+ *  数据来自 GET {base}/api/v1/system/maintenance（见 PlayerViewModel.checkMaintenance）
+ * ========================================================================== */
+
+/** 紧急停机（level >= 3）：全屏阻断，不可关闭、不可操作、返回键无效。 */
+@Composable
+private fun MaintenanceBlockScreen(
+    info: PlayerViewModel.MaintenanceInfo,
+    dismissible: Boolean = false,
+    onDismiss: () -> Unit = {},
+) {
+    BackHandler(enabled = dismissible) { onDismiss() }
+    Dialog(
+        onDismissRequest = { if (dismissible) onDismiss() },
+        properties = DialogProperties(
+            dismissOnBackPress = dismissible,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surface)
+                // 吞掉所有点击，确保下面的界面完全不可操作
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { }
+        ) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(horizontal = 36.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Rounded.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(56.dp)
+                )
+                Spacer(Modifier.height(18.dp))
+                Text(
+                    info.displayTitle(),
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    info.displayMessage(),
+                    fontSize = 14.sp,
+                    lineHeight = 22.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                if (info.until.isNotBlank()) {
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "预计恢复：" + info.until,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 重要维护（level 2）：居中弹窗，有关闭按钮，但警告色明显。 */
+@Composable
+private fun MaintenanceNoticeDialog(
+    info: PlayerViewModel.MaintenanceInfo,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Rounded.Build,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+        },
+        title = {
+            Text(
+                info.displayTitle(),
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.error
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    info.displayMessage(),
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (info.until.isNotBlank()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "预计恢复：" + info.until,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("我知道了") } }
+    )
+}
+
+/** 普通维护（level 1）：顶部细横幅，只占一条，不遮挡也不拦截其它操作。 */
+@Composable
+private fun MaintenanceTopBanner(
+    info: PlayerViewModel.MaintenanceInfo,
+    onDismiss: () -> Unit
+) {
+    // 外层 Box 不处理任何手势 → 除横幅自身区域外，点击全部穿透到下面的界面
+    Box(modifier = Modifier.fillMaxSize()) {
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            shadowElevation = 2.dp,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .statusBarsPadding()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Rounded.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(info.displayTitle(), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    val msg = info.displayMessage()
+                    if (msg.isNotBlank()) {
+                        Text(
+                            msg,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (info.until.isNotBlank()) {
+                        Text(
+                            "预计恢复：" + info.until,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Rounded.Close,
+                        contentDescription = "关闭",
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/* ============================================================================
+ *  更新日志（入口在「账号」页 → 更新日志）
+ * ========================================================================== */
+
+/** 一条版本更新记录。public，供「账号」页的 ChangelogScreen（ProfileTab.kt）复用同一份数据。 */
+data class ChangelogEntry(val version: String, val items: List<String>)
+
+/** 各版本改动要点（只写项目里真实存在 / 真实修过的内容）。 */
+private val CHANGELOG: List<ChangelogEntry> = listOf(
+    ChangelogEntry(
+        version = "1.3.1",
+        items = listOf(
+            "日语 / 韩文歌词优先显示原文：不再把罗马音、拼音当主歌词（增强型 LRC 的行尾结束时间也已修正）",
+            "起播更快：解析链路总预算 ≤6 秒，优先快 CDN（kuwo / kugou），并后台预解析 + 预缓冲下一首",
+            "收藏增加本地缓存：未登录也能收藏，重装应用后登录即可与服务端自动合并回来",
+            "歌曲前奏阶段显示「等待前奏…」；控制台不再出现「享受纯净音乐」这类占位文案",
+            "搜索结果改为确定性排序：好版本（原唱 / 无 DJ 翻唱修饰）在最前，每次搜索顺序一致",
+            "搜索列表上滑到底自动加载更多（后端 kuwo / kugou / bilibili 已支持翻页）",
+            "跨源匹配放宽：歌手一方为空时不再误判「在免费歌源里没找到」",
+            "新增停服维护提示：普通维护顶部横幅、重要维护弹窗、紧急停机全屏阻断",
+            "「更新日志」入口位于「账号」页",
+            "移除沉浸模式；开源协议为 MIT"
+        )
+    ),
+    ChangelogEntry(
+        version = "1.3.0 及更早",
+        items = listOf(
+            "搜索提速：多源并行聚合 + 结果去重",
+            "推荐页自动续播；每日 30 首当天固定",
+            "记住上次播放的歌与进度",
+            "歌单导入与云端同步、各平台扫码登录",
+            "悬浮歌词（测试版）：可穿透、可调色、可调透明度",
+            "双风格界面：Material 3 与液态玻璃",
+            "音质切换（开发中）"
+        )
+    )
+)
+
+/**
+ * 更新日志数据源：最新版本排在最前。
+ * 「账号」页的更新日志页（ProfileTab.kt 的 ChangelogScreen）直接用它渲染，
+ * 保证「入口」和「内容」只有一个来源，不会出现"入口有了、条目还是旧的"。
+ */
+fun changelogEntries(): List<ChangelogEntry> = CHANGELOG
+
+@Composable
+fun ChangelogDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Rounded.SystemUpdate,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = { Text("更新日志", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                CHANGELOG.forEach { entry ->
+                    Text(
+                        "v" + entry.version,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    entry.items.forEach { line ->
+                        Row(modifier = Modifier.padding(bottom = 5.dp)) {
+                            Text(
+                                "•",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                line,
+                                fontSize = 13.sp,
+                                lineHeight = 19.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(14.dp))
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
 }
 
 @Composable

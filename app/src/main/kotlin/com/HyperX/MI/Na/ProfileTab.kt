@@ -875,6 +875,17 @@ fun ChangelogScreen(
                 .padding(horizontal = 20.dp)
         ) {
         var showOldLogs by remember { mutableStateOf(false) }
+            // v1.3.1 的条目统一来自 MainActivity 的 changelogEntries()（设置页入口已下线，
+            // 更新日志入口只在「账号」页；内容与数据源保持同一份，避免"入口有、条目旧"）。
+            changelogEntries().firstOrNull { it.version == "1.3.1" }?.let { entry ->
+                ChangelogItem(
+                    version = "v" + entry.version + " 正式版",
+                    date = "2026年11月8日",
+                    changes = entry.items,
+                    isLatest = true,
+                    backdrop = backdrop
+                )
+            }
             ChangelogItem(
                 version = "v1.3.0 正式版", date = "2026年11月3日",
                 changes = listOf(
@@ -897,7 +908,7 @@ fun ChangelogScreen(
                     "全局动效统一到 Motion 规范，清除所有渐变，全组件改为动态取色",
                     "移除「未登录」提醒弹窗，解除必须登录才能使用的限制提示"
                 ),
-                isLatest = true,
+                isLatest = false,
                 backdrop = backdrop
             )
             ChangelogItem(

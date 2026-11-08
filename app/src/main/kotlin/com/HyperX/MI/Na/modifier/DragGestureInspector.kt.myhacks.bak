@@ -1,0 +1,145 @@
+package com.HyperX.MI.Na.modifier
+
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
+import androidx.compose.ui.util.fastFirstOrNull
+import kotlinx.coroutines.withTimeoutOrNull
+
+suspend fun PointerInputScope.inspectDragGestures(
+    onDragStart: (down: PointerInputChange) -> Unit = {},
+    onDragEnd: (change: PointerInputChange) -> Unit = {},
+    onDragCancel: () -> Unit = {},
+    onDrag: (change: PointerInputChange, dragAmount: Offset) -> Unit
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(
+            requireUnconsumed = false,
+            pass = PointerEventPass.Initial,
+        )
+
+        onDragStart(down)
+        onDrag(down, Offset.Zero)
+        val upEvent = drag(
+            pointerId = down.id,
+            onDrag = { onDrag(it, it.positionChangeIgnoreConsumed()) },
+        )
+        if (upEvent != null) onDragEnd(upEvent) else onDragCancel()
+    }
+}
+
+/**
+ * 长按后再拖拽（忽略子级对事件的消费）。
+ *
+ * 为什么不能用官方的 awaitLongPressOrCancellation：
+ * 导航栏每个 item 都带 .clickable，而 detectTapGestures 会在 Main 通道立刻 consume 掉 DOWN；
+ * 官方实现一旦读到 isConsumed 就立刻放弃长按判定，所以长按永远不触发。
+ * 这里改为在 Initial 通道自行计时，并且只忽略「消费」，只关心「位移」。
+ */
+suspend fun PointerInputScope.inspectDragGesturesAfterLongPress(
+    onDragStart: (down: PointerInputChange) -> Unit = {},
+    onDragEnd: (change: PointerInputChange) -> Unit = {},
+    onDragCancel: () -> Unit = {},
+    onDrag: (change: PointerInputChange, dragAmount: Offset) -> Unit
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(
+            requireUnconsumed = false,
+            pass = PointerEventPass.Initial,
+        )
+        val longPressed = awaitLongPressIgnoringConsumed(
+            down.id,
+            viewConfiguration.longPressTimeoutMillis,
+        )
+        if (longPressed == null) return@awaitEachGesture
+
+        // 长按成立：消费掉本次手势，避免松手时再触发 item 的点击
+        longPressed.consume()
+        onDragStart(longPressed)
+        onDrag(longPressed, Offset.Zero)
+        val upEvent = drag(
+            pointerId = longPressed.id,
+            onDrag = { onDrag(it, it.positionChangeIgnoreConsumed()) },
+        )
+        if (upEvent != null) onDragEnd(upEvent) else onDragCancel()
+    }
+}
+
+/**
+ * 在 Initial 通道等待长按成立：期间只要指针没有明显位移且未被抬起，
+ * 就无视其它节点对事件的消费；位移超过 touchSlop 则判定为普通滑动（交给下层滚动或点击）。
+ */
+private suspend fun AwaitPointerEventScope.awaitLongPressIgnoringConsumed(
+    pointerId: PointerId,
+    longPressTimeoutMillis: Long
+): PointerInputChange? {
+    var pointer = pointerId
+    var downPosition: Offset? = null
+    var lastChange: PointerInputChange? = null
+    // 手指按住不动时系统不会再派发指针事件，awaitPointerEvent 会一直挂起，
+    // 所以必须用协程超时来判定长按成立，而不能靠轮询时间戳。
+    val cancelled = withTimeoutOrNull(longPressTimeoutMillis) {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.fastFirstOrNull { it.id == pointer } ?: return@withTimeoutOrNull true
+            val origin = downPosition ?: change.position.also { downPosition = it }
+            if (change.changedToUpIgnoreConsumed()) return@withTimeoutOrNull true
+            if ((change.position - origin).getDistance() > viewConfiguration.touchSlop) {
+                return@withTimeoutOrNull true
+            }
+            lastChange = change
+        }
+        @Suppress("UNREACHABLE_CODE") false
+    }
+    // cancelled == null 代表超时（期间未抬起也未移动）→ 长按成立
+    return if (cancelled == null && downPosition != null) lastChange else null
+}
+
+private suspend inline fun AwaitPointerEventScope.drag(
+    pointerId: PointerId,
+    onDrag: (PointerInputChange) -> Unit
+): PointerInputChange? {
+    val isPointerUp = currentEvent.changes.fastFirstOrNull { it.id == pointerId }?.pressed != true
+    if (isPointerUp) {
+        return null
+    }
+    var pointer = pointerId
+    while (true) {
+        val change = awaitDragOrUp(pointer) ?: return null
+        if (change.changedToUpIgnoreConsumed()) {
+            return change
+        }
+        onDrag(change)
+        pointer = change.id
+    }
+}
+
+private suspend inline fun AwaitPointerEventScope.awaitDragOrUp(
+    pointerId: PointerId
+): PointerInputChange? {
+    var pointer = pointerId
+    while (true) {
+        val event = awaitPointerEvent(PointerEventPass.Initial)
+        val dragEvent = event.changes.fastFirstOrNull { it.id == pointer } ?: return null
+        if (dragEvent.changedToUpIgnoreConsumed()) {
+            val otherDown = event.changes.fastFirstOrNull { it.pressed }
+            if (otherDown == null) {
+                return dragEvent
+            } else {
+                pointer = otherDown.id
+            }
+        } else {
+            val hasDragged = dragEvent.previousPosition != dragEvent.position
+            if (hasDragged) {
+                return dragEvent
+            }
+        }
+    }
+}

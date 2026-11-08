@@ -325,7 +325,9 @@ object MusicApiClient {
 
     /** 简化版歌曲搜索（`/api/v1/music/search?type=song`）。 */
     suspend fun resolveSongUrl(id: String, source: String): String = withContext(Dispatchers.IO) {
-        tryResolveUrl(id, source) ?: throw MusicApiException("该歌曲受版权/会员限制，无法播放")
+        // 只用「指定来源 + 指定 id」解析（同平台同 id 必然是同一首歌）；
+        // 失败就是失败，绝不回退到「按歌名去别家搜」或「拿 id 去别家试」。
+        tryResolveUrl(id, source) ?: throw MusicApiException("NO_STRICT_MATCH")
     }
 
     suspend fun resolveUnblockUrl(songId: String): String? = withContext(Dispatchers.IO) {
@@ -356,178 +358,313 @@ object MusicApiClient {
         }
     }
 
-    /** 免 Cookie 可用源，按「能拿到完整版」的实测成功率排序。 */
-    private val PREFERRED_SOURCES = listOf("kuwo", "migu", "bilibili", "netease", "qq", "kugou")
+    /**
+     * 免 Cookie 可用源，按**实测 prepare 速度**排序（序号越小优先级越高）。
+     *
+     * 实测（Android 模拟器，同一台设备同一网络）：
+     *   kuwo / kugou / migu / bilibili 直链 → onPrepared 0.4~1.4 秒
+     *   网易云直链（m701.music.126.net）   → onPrepared 稳定 31~32 秒
+     * 所以跨源候选同分时优先选 kuwo/kugou，网易云放最后（用户反馈"要等很久才自动播放"）。
+     */
+    private val PREFERRED_SOURCES = listOf("kuwo", "kugou", "migu", "bilibili", "qq", "netease")
+
+    /** 跨源匹配允许的最大时长差（秒）。 */
+    private const val STRICT_DURATION_TOLERANCE_SEC = 3L
+
+    /** 源优先级：越靠前越小。 */
+    private fun sourcePriority(src: String): Int =
+        PREFERRED_SOURCES.indexOf(src).let { if (it < 0) PREFERRED_SOURCES.size else it }
 
     /**
      * 解析播放地址，**并返回它真正来自哪个平台的哪个 id**（[ResolvedPlay]）。
      *
-     * 顺序（越靠前越可信）：
-     *  1. 歌曲**自身来源 + 自身 id** —— 一定是同一首歌，不做任何重搜；
-     *  2. 按「歌名 + 歌手」逐源重搜，候选按**版本相似度**排序（原唱优先，
-     *     DJ版/Remix/Live/伴奏/翻唱等修饰作为惩罚项），同源优先；
-     *  3. 仅当没有歌名可用时，才用原 id 硬试其它源（最后兜底）。
+     * 铁律：**绝不允许「播出来的声音是另一首歌」**。
+     *
+     * 顺序（宁缺毋滥）：
+     *  1. 只用「歌曲**自身来源 + 自身 id**」解析直链。同平台的同一个 id 必然是同一首歌，成功即返回。
+     *  2. 跨源只作最后手段，且候选必须**同时**通过三重校验（见 [isStrictSameSong]）：
+     *       ① 歌名归一化后**完全相等**（[strictTitleKey]，已去掉版本修饰词/B 站风格的 "正标题/上传者"）
+     *       ② 歌手**有交集**（按 `/ 、 & , ;` 拆分后逐词比较，双方都必须有非空歌手名）
+     *       ③ 时长指纹：双方 duration 都 > 0 时差值必须 <= [STRICT_DURATION_TOLERANCE_SEC] 秒
+     *     在全部合格候选里选「时长差最小」的；差值相同时选**源优先级更高**的。
+     *  3. 没有任何候选通过 → 返回 null（**宁可跳过也不放错歌**）。
+     *
+     * 已彻底删除的两条危险路径：
+     *  · 「按歌名去别的平台搜，取最像的一个」—— 同名/近名的另一首歌会被直接播放；
+     *  · 「用原 id 去其它平台硬试」—— 不同平台的数字 id 会撞车，对方返回**合法但完全不同**的歌。
      *
      * 调用方必须用返回的 `source/id` 去取歌词，否则会出现「用 A 平台 id 取 B 平台歌词」。
      *
      * @param knownSource 歌曲自身所属平台（`Song.source`），空串表示未知。
+     * @param durationSec 歌曲自身的时长（秒）。给了就作为时长指纹；没给则尝试从自身来源的
+     *                    严格同名结果里补一个，补不到按"时长未知"处理（放宽但不优先）。
      */
     suspend fun resolveOrigin(
         songId: String,
         name: String,
         artist: String,
         knownSource: String,
+        durationSec: Long = 0L,
     ): ResolvedPlay? = withContext(Dispatchers.IO) {
         val own = knownSource.trim().lowercase()
-        // ① 自身来源 + 自身 id：同一首歌，最可靠
+        // ① 自身来源 + 自身 id：同一首歌，唯一可以直接信任 id 的分支
         if (own.isNotBlank() && songId.isNotBlank()) {
             tryResolveUrl(songId, own)?.let { return@withContext ResolvedPlay(it, own, songId) }
         }
-        val order = (listOf(own).filter { it.isNotBlank() } + PREFERRED_SOURCES).distinct()
-        // ② 歌名 + 歌手重搜（版本偏好排序）
+        // ② 跨源：必须过三重校验；过不了就当作没找到
         if (name.isNotBlank()) {
-            for (src in order) {
-                resolveOriginByName(name, artist, src)?.let { return@withContext it }
-            }
+            val target = discoverTargetDurationSec(songId, name, artist, own, durationSec)
+            val others = PREFERRED_SOURCES.filter { it != own }
+            strictResolve(name, artist, target, others)?.let { return@withContext it }
         }
-        // ③ 无歌名可搜时，才允许原 id 硬试其它源
-        if (name.isBlank() && songId.isNotBlank()) {
-            for (src in order) {
-                tryResolveUrl(songId, src)?.let { return@withContext ResolvedPlay(it, src, songId) }
-            }
-        }
+        // ③ 没有第三条路：绝不用别家的 id 去别家源硬试，也绝不退回"最像的一个"
         null
     }
 
+    // ------------------------------------------------------------------
+    //  严格「同一首歌」判定 —— 所有跨源播放的唯一入口
+    // ------------------------------------------------------------------
+
+    /** 括号片段（(…) （…） […] 【…】）：归一化时整段丢弃。 */
+    private val BRACKET_SEGMENT_REGEX = Regex("[（(\\[【][^）)\\]】]{0,60}[）)\\]】]")
+
+    /** 空白与标点（含中文标点）：严格比对键里全部丢掉。 */
+    private val KEY_PUNCT_REGEX = Regex("[\\s\\p{Punct}·・、，。！？；：…—～《》「」『』“”‘’]+")
+
     /**
-     * 判断重搜出来的候选是不是**同一首歌**。
-     *
-     * 只靠"能取到地址"是不够的：上游对冷门/受限歌曲经常返回同名附近的结果，
-     * 甚至完全不相干的另一首歌，直接采用就会"切下一首变成别人唱的别的歌"。
-     * 规则：歌名需要互相包含（能容忍 "歌名(DJ版)" 这类修饰），
-     * 歌手至少有一方包含另一方（多位歌手里命中一个即可）。
+     * 版本修饰词 —— 归一化时整词删除。
+     * ASCII 词要求两侧不是字母/数字（避免把 "alive" 里的 live 误删）；中文词直接删。
      */
-    private fun normSongText(s: String): String = s.lowercase()
-        .replace(Regex("[\\s()（）\\[\\]【】·・,.，、_\\-]"), "")
+    private val VERSION_DECORATOR_REGEXES: List<Regex> = listOf(
+        Regex("(?i)(?<![a-z0-9])(dj\\s*版?|remix\\s*版?|混音\\s*版?|加速版|减速版|sped\\s*up|slowed)(?![a-z0-9])"),
+        Regex("(?i)(?<![a-z0-9])(live\\s*版?|现场版|演唱会|现场|unplugged|concert)(?![a-z0-9])"),
+        Regex("(?i)(?<![a-z0-9])(cover\\s*版?|翻唱\\s*版?|翻自)(?![a-z0-9])"),
+        Regex("(?i)(?<![a-z0-9])(instrumental|karaoke|off\\s*vocal|伴奏\\s*版?|无人声)(?![a-z0-9])"),
+        Regex("(?i)(?<![a-z0-9])(纯音乐\\s*版?|纯音\\s*版?|acoustic|inst\\.)(?![a-z0-9])"),
+        Regex("(?i)(童声\\s*版?|女声版|男声版|钢琴版|吉他版|清唱|合唱版|铃声版|完整版|高清版|无损版)")
+    )
 
-    /** 歌名是否对得上（互相包含即可，能容忍 "歌名(DJ版)" 这类修饰）。 */
-    private fun nameMatches(candName: String, targetName: String): Boolean {
-        val cn = normSongText(candName)
-        val tn = normSongText(targetName)
-        if (cn.isBlank() || tn.isBlank()) return false
-        return cn.contains(tn) || tn.contains(cn)
+    /**
+     * 歌名清洗（保留词间空格，用于**搜索关键词**）：
+     * 小写 → 去括号内容 → 去 "/" 之后的部分（B 站常见的 "正标题/上传者 (Cover)" 写法）
+     * → 去掉版本修饰词（dj版/remix/live/翻唱/cover/伴奏/instrumental/纯音乐…）。
+     */
+    private fun strictCleanTitle(raw: String): String {
+        var s = raw.lowercase()
+        s = BRACKET_SEGMENT_REGEX.replace(s, " ")
+        s = s.substringBefore("/")
+        for (re in VERSION_DECORATOR_REGEXES) s = re.replace(s, " ")
+        return s.replace(Regex("\\s+"), " ").trim()
     }
 
-    /** 歌手是否对得上（多位歌手里命中一个即可；任一侧为空时视为"无法判断"）。 */
-    private fun artistMatches(candArtist: String, targetArtist: String): Boolean {
-        val ta = normSongText(targetArtist)
-        if (ta.isBlank()) return true
-        val ca = normSongText(candArtist)
-        if (ca.isBlank()) return true
-        return ca.contains(ta) || ta.contains(ca) ||
-            targetArtist.split("/", ",", "、", "&").any { p ->
-                val np = normSongText(p)
-                np.isNotBlank() && ca.contains(np)
+    /**
+     * 严格歌名比对键：**归一化后必须完全相等**才算同一首。
+     * [strictCleanTitle] → 去掉所有空白与标点。
+     */
+    private fun strictTitleKey(raw: String): String =
+        KEY_PUNCT_REGEX.replace(strictCleanTitle(raw), "")
+
+    /** 歌手拆词：小写 → 按 `/ 、 & , ;` 拆分 → 去掉空白标点。 */
+    private fun strictArtistTokens(raw: String): Set<String> {
+        if (raw.isBlank()) return emptySet()
+        return raw.lowercase()
+            .split(Regex("[/、&,，;；]+"))
+            .map { KEY_PUNCT_REGEX.replace(it, "") }
+            .filter { it.isNotBlank() }
+            .toSet()
+    }
+
+    /**
+     * 歌手是否有交集：**双方都必须至少有一个非空歌手名**，
+     * 且存在一对「完全相等」或「互相包含」（短词长度 < 2 时只认完全相等，避免 "a" 命中一切）。
+     */
+    private fun strictArtistIntersect(candArtist: String, targetArtist: String): Boolean {
+        val a = strictArtistTokens(candArtist)
+        val b = strictArtistTokens(targetArtist)
+        if (a.isEmpty() || b.isEmpty()) return false
+        return a.any { x ->
+            b.any { y ->
+                if (x == y) true
+                else {
+                    val short = if (x.length <= y.length) x else y
+                    val long = if (x.length <= y.length) y else x
+                    short.length >= 2 && long.contains(short)
+                }
             }
+        }
     }
 
-    /** 两个条件都满足才算"同一首歌"。 */
-    private fun looksLikeSameSong(
-        candName: String,
-        candArtist: String,
+    /** 时长差（秒）；任一侧 <= 0 表示上游没给时长 → null（未知，放宽但排序靠后）。 */
+    private fun durationDeltaSeconds(candSec: Long, targetSec: Long): Long? {
+        if (candSec <= 0L || targetSec <= 0L) return null
+        return kotlin.math.abs(candSec - targetSec)
+    }
+
+    /**
+     * 跨源候选的**唯一**准入判定：三重校验全部通过才算「同一首歌」。
+     *   ① 歌名归一化后完全相等（[strictTitleKey]）
+     *   ② 歌手有交集，**或其中一方 artist 为空**（很多源返回的 artist 是空的，
+     *      以前这里直接拒绝 → 《精卫》这类歌被判"在免费歌源里没找到"，是误杀）
+     *   ③ 双方 duration 都 > 0 时，差值 <= [STRICT_DURATION_TOLERANCE_SEC] 秒
+     *      （任一侧为 0 视为"时长未知"，放宽但不优先，见 [durationDeltaSeconds]）
+     * 任何一条不满足 → 直接丢弃（**不存在"仅按歌名相似就通过"的分支**）。
+     */
+    private fun isStrictSameSong(
+        cand: PlaylistSong,
         targetName: String,
         targetArtist: String,
-    ): Boolean = nameMatches(candName, targetName) && artistMatches(candArtist, targetArtist)
+        targetDurationSec: Long,
+    ): Boolean {
+        val targetKey = strictTitleKey(targetName)
+        if (targetKey.isBlank()) return false
+        if (strictTitleKey(cand.name) != targetKey) return false
+        // ② 歌手校验：任何一方没有可用的歌手名时不做歌手比对（只靠同名 + 时长兜底）
+        val candArtistTokens = strictArtistTokens(cand.artist)
+        val targetArtistTokens = strictArtistTokens(targetArtist)
+        if (candArtistTokens.isNotEmpty() && targetArtistTokens.isNotEmpty() &&
+            !strictArtistIntersect(cand.artist, targetArtist)
+        ) return false
+        val delta = durationDeltaSeconds(cand.duration, targetDurationSec)
+        if (delta != null && delta > STRICT_DURATION_TOLERANCE_SEC) return false
+        return true
+    }
+
+    /** 搜索关键词：从「精确」到「宽松」依次尝试（校验始终严格，关键词宽松不会放错歌）。 */
+    private fun strictSearchKeywords(name: String, artist: String): List<String> {
+        val clean = strictCleanTitle(name)
+        val rawTitle = name.substringBefore("/").trim()
+        val out = LinkedHashSet<String>()
+        fun addTitleWithArtist(t: String) {
+            if (t.isBlank()) return
+            out.add(listOf(t, artist).filter { it.isNotBlank() }.joinToString(" "))
+            out.add(t)
+        }
+        addTitleWithArtist(name.trim())
+        if (rawTitle.isNotBlank() && rawTitle != name.trim()) addTitleWithArtist(rawTitle)
+        if (clean.isNotBlank() && clean != rawTitle.lowercase().trim()) addTitleWithArtist(clean)
+        return out.filter { it.isNotBlank() }.take(4)
+    }
 
     /**
-     * 在**单个源**内按「歌名 + 歌手」重搜并解析地址。
-     * 候选按版本相似度排序：原唱/基础歌名完全一致的排最前，带 DJ/Remix/Live/伴奏/翻唱
-     * 等修饰的降权；同分时优先时长更接近的候选。
+     * 目标歌曲的时长指纹（秒）。
+     * 调用方给了就用；没给就回到「歌曲自身来源」按**严格同名 + 歌手交集**找一次元数据补上。
+     * 补不到返回 0 = 未知（跨源时放宽，但排序上排在有指纹的候选之后）。
+     */
+    private suspend fun discoverTargetDurationSec(
+        songId: String,
+        name: String,
+        artist: String,
+        own: String,
+        given: Long,
+    ): Long {
+        if (given > 0L) return given
+        if (own.isBlank() || name.isBlank()) return 0L
+        val key = strictTitleKey(name)
+        if (key.isBlank()) return 0L
+        for (kw in strictSearchKeywords(name, artist)) {
+            val found = runCatching { searchSongs(kw, MusicSource.fromName(own)) }.getOrNull().orEmpty()
+            found.firstOrNull {
+                strictTitleKey(it.name) == key && strictArtistIntersect(it.artist, artist) && it.duration > 0L
+            }?.let { return it.duration }
+        }
+        return 0L
+    }
+
+    /** 内部用：一个通过三重校验的跨源候选。 */
+    private data class StrictCandidate(
+        val song: PlaylistSong,
+        val src: String,
+        /** 时长差；null = 时长未知。 */
+        val durationDelta: Long?,
+    )
+
+    /**
+     * 跨源严格解析 —— **所有**跨源播放都必须走这里。
+     *
+     * 1. 在给定源里按关键词搜索；
+     * 2. 只用 [isStrictSameSong] 过滤（三重校验，任一不满足直接丢）；
+     * 3. 排序：有明确时长指纹的优先 → 时长差小的优先 → 源优先级高的优先；
+     * 4. 按序尝试解析直链，第一个成功的即返回；全失败返回 null（宁可跳过）。
+     */
+    private suspend fun strictResolve(
+        name: String,
+        artist: String,
+        targetDurationSec: Long,
+        sources: List<String>,
+    ): ResolvedPlay? {
+        val targetKey = strictTitleKey(name)
+        if (targetKey.isBlank()) return null
+        val keywords = strictSearchKeywords(name, artist)
+        if (keywords.isEmpty()) return null
+
+        val found = LinkedHashMap<String, StrictCandidate>()
+        for (src in sources) {
+            for (kw in keywords) {
+                val list = runCatching { searchSongs(kw, MusicSource.fromName(src)) }.getOrNull().orEmpty()
+                for (c in list) {
+                    if (c.id.isBlank()) continue
+                    // ← 三重校验：歌名归一化完全相等 + 歌手交集 + 双方时长都>0时差 <= 3s
+                    if (!isStrictSameSong(c, name, artist, targetDurationSec)) continue
+                    val k = src + "|" + c.id
+                    if (found.containsKey(k)) continue
+                    found[k] = StrictCandidate(c, src, durationDeltaSeconds(c.duration, targetDurationSec))
+                }
+            }
+        }
+        if (found.isEmpty()) return null
+
+        val ordered = found.values.sortedWith(
+            compareBy<StrictCandidate> { if (it.durationDelta == null) 1 else 0 }  // 有指纹的优先
+                .thenBy { it.durationDelta ?: Long.MAX_VALUE }                     // 时长差最小
+                .thenBy { sourcePriority(it.src) }                                 // 同分选源优先级更高
+        )
+        for (cand in ordered) {
+            tryResolveUrl(cand.song.id, cand.src)?.let { return ResolvedPlay(it, cand.src, cand.song.id) }
+        }
+        return null
+    }
+
+    /**
+     * 在**单个源**内做严格匹配并解析地址。
+     *
+     * 注意：本方法**不再**"取最像的一个"。内部只有一条路径 —— [strictResolve]，
+     * 即「歌名归一化完全相等 + 歌手交集 + （双方时长都 > 0 时）差 <= 3 秒」三重校验，
+     * 全不通过就返回 null。旧实现里的"二级：只要求歌名对得上"已删除 ——
+     * 那正是「搜到同名/近名的另一首歌就直接播放」的根源。
      */
     suspend fun resolveOriginByName(
         name: String,
         artist: String,
         source: String,
+        durationSec: Long = 0L,
     ): ResolvedPlay? = withContext(Dispatchers.IO) {
         if (name.isBlank()) return@withContext null
         val src = source.trim().lowercase().ifBlank { "netease" }
-
-        // 关键词从「精确」到「宽松」依次尝试。
-        // 只用 "歌名 + 歌手" 是不够的：像网易云导入的歌单，歌手串常带英文名/多人合作
-        // （"周杰伦 (Jay Chou)"、"某某/某某某"），原样丢给酷我/酷狗反而搜不到东西，
-        // 结果整首歌被判成"该歌曲受版权/会员限制，暂无可用播放源"。
-        val keywords = buildList {
-            val withArtist = listOf(name, artist).filter { it.isNotBlank() }.joinToString(" ")
-            if (withArtist.isNotBlank()) add(withArtist)
-            if (name.isNotBlank()) add(name)
-        }.distinct()
-
-        for (kw in keywords) {
-            val found = runCatching { searchSongs(kw, MusicSource.fromName(src)) }.getOrNull().orEmpty()
-            if (found.isEmpty()) continue
-            val ranked = rankCandidates(found, name, artist)
-
-            // 一级：歌名对得上 + 歌手也对得上（最可靠）
-            for (cand in ranked) {
-                if (!nameMatches(cand.name, name) || !artistMatches(cand.artist, artist)) continue
-                tryResolveUrl(cand.id, src)?.let { return@withContext ResolvedPlay(it, src, cand.id) }
-            }
-            // 二级：歌手写法在各平台差异很大，退一步只要求**歌名对得上**
-            for (cand in ranked) {
-                if (!nameMatches(cand.name, name)) continue
-                tryResolveUrl(cand.id, src)?.let { return@withContext ResolvedPlay(it, src, cand.id) }
-            }
-        }
-
-        // 关键词都试过、歌名仍然对不上：宁可不播，也绝不拿别的歌来凑。
-        // （之前这里是"退回排序第一"，结果《兰亭序》被放出了完全不相干的另一首歌的声音。）
-        null
+        strictResolve(name, artist, durationSec, listOf(src))
     }
 
     /**
-     * 候选排序：分数越高越可能是「用户想要的那个版本」。
+     * 兼容旧调用：只要地址。
      *
-     * 打分规则（越高越好）：
-     *  - 基础歌名完全一致 +100；互相包含 +60；否则名称相关度按公共长度给分
-     *  - 歌手完全匹配 +40；互相包含 +20
-     *  - 候选带版本修饰而目标没有 → −80（「搜原唱却拿到 DJ 版」的直接原因）
-     *  - 候选版本 tag 与目标 tag 不同 → −40
+     * ⚠️ 调用方（MainActivity）是**按候选源逐个循环**调用本方法的：传进来的 `source`
+     * 是"这次要试的源"，**不一定是这首歌自己的平台**；而 `id` 是这首歌在原平台的 id。
+     * 跨平台拿 id 直连是禁止的（不同平台的数字 id 会撞车，对方会返回合法但完全不同的歌），
+     * 所以这里**绝不直接信任 id**：只在 `source` 内按「歌名 + 歌手 + 时长」严格搜索，
+     * 命中同一首歌才解析直链；找不到就抛 "NO_STRICT_MATCH"（上层提示后跳过）。
      */
-    private fun rankCandidates(found: List<PlaylistSong>, name: String, artist: String): List<PlaylistSong> {
-        val targetTitle = songTitleKey(name)
-        val targetTag = songVersionTag(name)
-        val targetArtists = artist.lowercase().split(",", "、", "/", "&", "，", " ")
-            .map { it.trim() }.filter { it.isNotEmpty() }
-        fun score(s: PlaylistSong): Double {
-            var v = 0.0
-            val t = songTitleKey(s.name)
-            if (targetTitle.isNotBlank() && t == targetTitle) v += 100.0
-            else if (targetTitle.isNotBlank() && (t.contains(targetTitle) || targetTitle.contains(t))) v += 60.0
-            else {
-                // 公共前缀长度作为弱相关度
-                val common = targetTitle.zip(t).takeWhile { (a, b) -> a == b }.count()
-                v += common * 3.0
-            }
-            val a = s.artist.lowercase()
-            if (targetArtists.isNotEmpty() && a.isNotBlank()) {
-                if (targetArtists.any { a == it }) v += 40.0
-                else if (targetArtists.any { a.contains(it) || it.contains(a) }) v += 20.0
-            }
-            val tag = songVersionTag(s.name)
-            if (tag.isNotBlank() && targetTag.isBlank()) v -= 80.0
-            else if (tag != targetTag) v -= 40.0
-            return v
-        }
-        return found.withIndex()
-            .map { (idx, s) -> Triple(s, score(s), -idx) }   // 同分保持原顺序（上游相关度）
-            .sortedWith(compareByDescending<Triple<PlaylistSong, Double, Int>> { it.second }.thenByDescending { it.third })
-            .map { it.first }
+    suspend fun resolveSongUrlByName(
+        id: String,
+        name: String,
+        artist: String,
+        source: String,
+        durationSec: Long = 0L,
+    ): String = withContext(Dispatchers.IO) {
+        val src = source.trim().lowercase().ifBlank { "netease" }
+        // 仅用于日志：能证明这条路径没有拿 id 去跨源直连
+        android.util.Log.d("MINova-HTTP", "strictResolve src=" + src + " ignoreId=" + id)
+        strictResolve(name, artist, durationSec, listOf(src))?.url
+            ?: throw MusicApiException("NO_STRICT_MATCH")
     }
-
-    /** 兼容旧调用：只要地址。 */
-    suspend fun resolveSongUrlByName(id: String, name: String, artist: String, source: String): String =
-        resolveOrigin(id, name, artist, source)?.url
-            ?: throw MusicApiException("该歌曲受版权/会员限制，暂无可用播放源")
 
     private suspend fun tryResolveUrl(id: String, source: String): String? {
         if (id.isBlank()) return null
@@ -546,12 +683,15 @@ object MusicApiClient {
         }
     }
 
-    suspend fun searchSongs(keyword: String, source: MusicSource): List<PlaylistSong> = withContext(Dispatchers.IO) {
+    suspend fun searchSongs(keyword: String, source: MusicSource, page: Int = 1): List<PlaylistSong> = withContext(Dispatchers.IO) {
         // 免费曲库走 Internet Archive 的公开接口，不经后端聚合服务
         if (source == MusicSource.ARCHIVE) return@withContext searchArchive(keyword)
         val src = source.apiSourceName() ?: throw MusicApiException("该平台不支持在线搜索")
         if (keyword.isBlank()) throw MusicApiException("搜索关键词不能为空")
-        val url = buildUrl(baseUrl, "/api/v1/music/search", listOf("q" to keyword, "type" to "song", "sources" to src))
+        val params = mutableListOf("q" to keyword, "type" to "song", "sources" to src)
+    // 只在翻页时带上 page（page=1 与不传等价，保证原有调用行为不变）
+    if (page > 1) params.add("page" to page.toString())
+    val url = buildUrl(baseUrl, "/api/v1/music/search", params)
         val text = execute("GET", url, timeoutMs = 12_000)
         val data = envelopeData(text)
         val arr = when (data) {

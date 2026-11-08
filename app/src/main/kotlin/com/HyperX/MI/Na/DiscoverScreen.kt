@@ -87,13 +87,20 @@ import com.google.gson.Gson
 /** 从歌名/专辑解析出版本标签：Live / DJ版 / 翻唱 / 伴奏 / 纯音乐 */
 fun parseVersionTag(name: String, album: String = ""): String? {
     val lower = name.lowercase()
-    val alb = album.lowercase()
+    // 只在"版本标注"可能出现的位置匹配：括号内、破折号之后、以及专辑名。
+    // 之前直接 lower.contains("live") / contains("cover") 会误伤大量正常歌名：
+    //   Be**live**ve → 被标 Live；Dis**cover**y → 被标 翻唱；任何含 "DJ " 的也被标 DJ版。
+    val inBrackets = Regex("[（(\\[【]([^）)\\]】]{1,24})[）)\\]】]")
+        .findAll(lower).map { it.groupValues[1] }.joinToString(" ")
+    val tail = lower.substringAfterLast("-", "").substringAfterLast("–", "").trim()
+    val hay = (inBrackets + " " + tail + " " + album.lowercase()).trim()
+    fun has(vararg keys: String) = keys.any { hay.contains(it) }
     return when {
-        lower.contains("dj版") || lower.contains("dj 版") || lower.contains("remix") || lower.contains("dj ") -> "DJ版"
-        lower.contains("live") || lower.contains("演唱会") || lower.contains("演唱会版") -> "Live"
-        lower.contains("翻唱") || lower.contains("cover") -> "翻唱"
-        lower.contains("伴奏") || lower.contains("instrumental") || lower.contains("accompaniment") -> "伴奏"
-        lower.contains("纯音乐") -> "纯音乐"
+        has("dj版", "dj 版", "remix", "dj") -> "DJ版"
+        has("live", "演唱会", "concert") -> "Live"
+        has("翻唱", "cover", "cover版") -> "翻唱"
+        has("伴奏", "instrumental", "accompaniment", "off vocal") -> "伴奏"
+        has("纯音乐") -> "纯音乐"
         else -> null
     }
 }
@@ -785,27 +792,8 @@ private fun CardDetailPage(
                             )
                         }
                     Spacer(Modifier.width(8.dp))
-                    // 版本标签（Live/DJ版/翻唱/伴奏/纯音乐）
-                    parseVersionTag(song.name, song.album)?.let { tag ->
-                        Box(
-                            modifier = Modifier
-                                .padding(start = 8.dp)
-                                .height(20.dp)
-                                .padding(horizontal = 8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.secondaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = tag,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
+                    // 版本标签（原唱/翻唱/DJ版/Live/伴奏/纯音乐）已按用户要求**不再显示**；
+                    // parseVersionTag 仍保留，仅用于排序。
 
                                                 // 与搜索列表一致：播放中显示律动条，否则显示时长
                                                 androidx.compose.animation.AnimatedContent(
