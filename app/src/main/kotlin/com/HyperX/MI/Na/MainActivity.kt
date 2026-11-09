@@ -388,15 +388,17 @@ class MusicApiService {
             }
             // 按「抓取到达顺序」原样返回：展示层统一做整体倒序（用户要求默认倒序、不可调整）。
             // 这里不再做「原唱优先」重排 —— sortSearchResults / isJunkVersion 保留但已不参与展示。
-            merged.values.toList()
+            merged.values.toList().filter { isLikelyMusic(it) }
         }.getOrNull().orEmpty()
 
         // 全空时自动重试一次：上游偶发抽风（限流/超时）时第二次往往就正常。
         // 这是「有人搜索音乐加载不出来」最有效的兜底。
-        var free = fetchMerged(listOf("kuwo", "migu", "bilibili", "netease", "qq", "kugou"))
+        // 用户方案：搜索只走网易云（原曲目录最全、原唱命中最高）；
+        // 点击播放时再由 resolveNextPlayUrl 去其他平台严格匹配同一首歌（快 CDN 优先）。
+        var free = fetchMerged(listOf("netease"))
         if (free.isEmpty()) {
             kotlinx.coroutines.delay(700L)
-            free = fetchMerged(listOf("netease", "qq"))
+            free = fetchMerged(listOf("netease"))
         }
         if (free.isNotEmpty()) {
             searchCache[keyword] = System.currentTimeMillis() to free
@@ -450,7 +452,7 @@ class MusicApiService {
      */
     suspend fun searchPage(keyword: String, page: Int): List<Song> = withContext(Dispatchers.IO) {
         if (keyword.isBlank() || page < 2) return@withContext emptyList()
-        val sources = listOf("kuwo", "migu", "bilibili", "netease", "qq", "kugou")
+        val sources = listOf("netease")
         val merged = java.util.Collections.synchronizedMap(LinkedHashMap<String, Song>())
         kotlinx.coroutines.coroutineScope {
             val jobs = sources.map { srcName ->
@@ -769,6 +771,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     /** 连续播放失败次数：用来在整张歌单都要会员时停止"无限自动跳过"。 */
     private var playFailStreak = 0
+    /** 当前这首歌是否已用过网易云 outer 兜底（只允许一次，避免 onError 死循环） */
+    private var neteaseFallbackTried = false
 
     /**
      * 兜底播放队列：推荐页各分区点歌时没有显式传队列，
@@ -786,6 +790,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     // ── 「加载更多」分页状态 ──
     /** 当前关键词已经加载到第几页（后端 page 从 1 开始） */
     private var currentSearchPage = 1
+    /** 连续「这一页没拿到新歌」的次数：避免无限翻页（表现为一直停在加载中） */
+    private var emptyPageStreak = 0
     /** 当前搜索关键词：加载更多必须用同一个词 */
     private var currentSearchKeyword = ""
     private val _hasMoreSearch = MutableStateFlow(false)
@@ -803,10 +809,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _isLoadingMore.value = true
         viewModelScope.launch {
             val next = currentSearchPage + 1
-            val raw = runCatching { apiService.searchPage(kw, next) }.getOrDefault(emptyList())
+            // 15 秒超时兜底：无论上游多慢都会走到下面把「加载中」解锁，绝不卡住
+            val raw = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(15_000) { apiService.searchPage(kw, next) }
+            }.getOrNull().orEmpty().filter { isLikelyMusic(it) }
             // 搜索词拆 token：去掉空白与标点（中英文都要处理）
             val tokens = kw.lowercase()
-                .split(Regex("[\\s\\p{Punct}·・、，。！？；：…—～「」『』（）()【】]+"))
+                .split(Regex("[\\s\\p{Punct}・、，。！？；：…—～「」『』（）()【】]+"))
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
             // 相关性过滤：歌名 + 歌手（先按分隔符拆词再拼起来比，避免"跨词拼出的假命中"影响判断）
@@ -827,9 +836,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     // 展示层是确定性排序（见 sortedSearchResults），新一页放在**前面**，
                     // 排完后新歌落在列表底部（用户当前视线下方，继续下滑即可看到）。
                     _searchResults.value = added + existing
+                    emptyPageStreak = 0
+                } else {
+                    // 连续两页都没拿到新歌 → 判定到底，停止翻页。
+                    // 否则 hasMore 一直为真会立刻再次触发，界面就永远停在「加载中」。
+                    emptyPageStreak++
+                    if (emptyPageStreak >= 2) _hasMoreSearch.value = false
                 }
-                // 只要后端还有数据就继续往后翻页（这一页全被相关性过滤掉也不代表没有下一页）
                 currentSearchPage = next
+                if (currentSearchPage >= 30) _hasMoreSearch.value = false
             }
             _isLoadingMore.value = false
         }
@@ -1120,7 +1135,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun addToHistory(keyword: String) { if (keyword.isBlank()) return; val list = _searchHistory.value.toMutableList(); list.remove(keyword); list.add(0, keyword); if (list.size > 15) list.removeAt(list.size - 1); _searchHistory.value = list; saveHistoryToFile() }
     fun clearHistory() { _searchHistory.value = emptyList(); saveHistoryToFile() }
 
-    fun searchOnline(keyword: String) { if (keyword.isBlank()) return; addToHistory(keyword); currentSearchKeyword = keyword; currentSearchPage = 1; _hasMoreSearch.value = true; _isLoadingMore.value = false; _isSearching.value = true; viewModelScope.launch { apiService.search(keyword).onSuccess { _searchResults.value = it; _hasMoreSearch.value = it.isNotEmpty() }.onFailure { _toastMessage.value = "网络异常" }; _isSearching.value = false } }
+    fun searchOnline(keyword: String) { if (keyword.isBlank()) return; addToHistory(keyword); currentSearchKeyword = keyword; currentSearchPage = 1; emptyPageStreak = 0; _hasMoreSearch.value = true; _isLoadingMore.value = false; _isSearching.value = true; viewModelScope.launch { apiService.search(keyword).onSuccess { _searchResults.value = it; _hasMoreSearch.value = it.isNotEmpty() }.onFailure { _toastMessage.value = "网络异常" }; _isSearching.value = false } }
 
     private fun loadDownloadedSongs() {
         try {
@@ -1208,8 +1223,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 while (inputStream.read(buffer).also { read = it } != -1) {
                     totalRead += read; outputStream.write(buffer, 0, read)
                     // 进度回调：
-                    //  · 有 Content-Length → 按比例给 0..1
-                    //  · 没有（分块传输，很多音乐 CDN 都这样）→ 给 -1，UI 显示"不确定进度"的转圈
+                    //  有 Content-Length → 按比例给 0..1
+                    //  没有（分块传输，很多音乐 CDN 都这样）→ 给 -1，UI 显示"不确定进度"的转圈
                     // 之前只在 fileLength > 0 时回调，这类响应整个下载过程进度条纹丝不动，
                     // 直到下完才突然弹"下载完成"。
                     val now = System.currentTimeMillis()
@@ -1291,8 +1306,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun playExternalSong(song: Song, sourceKey: String, queue: List<Song>? = null) {
         playStartedAt = System.currentTimeMillis()
         // 歌单里的歌也要记住队列，否则这首放完不知道该接哪一首
-        if (!queue.isNullOrEmpty() && _playQueue.value != queue) {
-            _playQueue.value = queue
+        // 未显式带队列时自动收编：点的是搜索结果里的歌 → 沿用搜索结果（按展示顺序）做队列，
+        // 否则「下一首」会落进推荐页各分区混在一起的兜底池，表现为乱跳。
+        var effectiveQueue = queue
+        if ((effectiveQueue == null || effectiveQueue.isEmpty()) &&
+            _searchResults.value.any { it.id == song.id }
+        ) {
+            effectiveQueue = _searchResults.value.asReversed()
+        }
+        if (!effectiveQueue.isNullOrEmpty() && _playQueue.value != effectiveQueue) {
+            _playQueue.value = effectiveQueue
             prefetchedPlays.clear()
         }
         playJob?.cancel()
@@ -1646,13 +1669,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val cjk = body.count { isNativeText(it) }
         val asciiLetters = body.count { it.isLetter() && it.code < 0x80 }
         val asciiDominant = asciiLetters > 0 && asciiLetters > cjk * 3
-        fun norm(t: String) = t.lowercase().replace(Regex("\\s|[（）()\\[\\]【】·・.]"), "")
+        fun norm(t: String) = t.lowercase().replace(Regex("\\s|[（）()\\[\\]【】・.]"), "")
         val artistHit = arTag == null || listOf(song.artist, *song.artist.split(",", "/", "&", "、").toTypedArray())
             .any { a -> a.isNotBlank() && (norm(arTag).contains(norm(a)) || norm(a).contains(norm(arTag))) }
         if (artistHit) return true
         // [ar:] 不匹配时：若正文以中文为主，仍可能是没写 [ar:] 的正常词 → 放行
         return !asciiDominant && cjk > 0
     }
+
+    /** 「自动点一下播放」兜底定时器：起播后若迟迟未出声，自动补一次手动播放的那一下 */
+    private var autoPlayKickJob: kotlinx.coroutines.Job? = null
 
     fun playSong(song: Song, queue: List<Song>? = null) {
         playStartedAt = System.currentTimeMillis()
@@ -1713,31 +1739,42 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     val expect = song.duration
                     // 试听片段检测：真实时长明显短于歌曲原长（如 VIP 歌 45 秒试听）→ 自动换下一个源
                     val expectMs = if (expect > 0L) expect * 1000L else 0L   // song.duration 是秒，mp.duration 是毫秒
-                    val isPreview = if (expectMs > 0L) actual < expectMs * 6 / 10 else actual in 1L..75_000L
+                    // 时长未知（expectMs<=0）时不再凭「短」就判试听：
+                    // 不少源返回的 duration 是 0 或明显虚高，误判会触发「换源→重解析→再缓冲」
+                    // 的连环重试，表现为自动播放干等几十秒。现在只有「已知原长且明显偏短」
+                    // 才判试听；时长未知就直接播 —— 宁可播，不要干等。
+                    val isPreview = expectMs > 0L && actual > 0L && actual < expectMs * 6 / 10
                     // 试听片段：用**独立计数**判断还能不能重试（最多 PREVIEW_RETRY_LIMIT 次）。
                     // 之前这里用的是 playSourceIndex，而解析循环不推进它 → 同一个源反复
                     // startPrepare→onPrepared→还是试听，静默死循环（表现为「点了没反应、一直不出声」）。
                     if (actual > 0L && isPreview && previewRetryCount < PREVIEW_RETRY_LIMIT) {
                         previewRetryCount++
+                        // 关键：**先立刻把当前这段播出来**。
+                        // 以前这里是「先去换源、换不到才播、换源期间不播」→ 表现为
+                        // 「等半天没声音，手动点一下播放键才出声」。有声音永远优于干等。
+                        runCatching { mp.start() }
+                        _isPlaying.value = true
+                        _duration.value = actual
+                        startProgressTracking()
+                        updateMediaSession(true)
+                        // 播放已经在进行，后台再尝试换成完整版（换到了 onPrepared 会重新接管）
                         viewModelScope.launch {
                             val next = resolveNextPlayUrl(song)
-                            val okNext = next != null && startPrepare(next)
-                            if (!okNext) {
-                                // 没有更多源可换：就用当前这段播
-                                runCatching { mp.start() }
-                                _isPlaying.value = true
-                                _duration.value = actual
-                                startProgressTracking()
-                                updateMediaSession(true)
-                            }
+                            if (next != null && startPrepare(next)) _currentPosition.value = 0
                         }
                         return@setOnPreparedListener
                     }
                     // 重试到上限仍只拿到试听片段 → 跳到下一首并提示，绝不再原地重试
                     if (actual > 0L && isPreview) {
-                        _toastMessage.value = "该歌曲为会员专享，当前音源仅提供约 ${actual / 1000} 秒试听，已跳过"
-                        _isPlaying.value = false
-                        playNext()
+                        // 绝不再 playNext()：用户点的是这首歌，跳到别的歌就是「乱跳」。
+                        // 播出来 + 明确提示，把选择权交给用户。
+                        runCatching { mp.start() }
+                        _isPlaying.value = true
+                        _duration.value = actual
+                        startProgressTracking()
+                        updateMediaSession(true)
+                        _toastMessage.value = "该歌曲为会员专享，当前音源仅提供约 ${actual / 1000} 秒试听"
+                        prefetchNext(song)
                         return@setOnPreparedListener
                     }
                         // 单位修复后仍可能是试听：四个源都用尽却只拿到短片段，说明服务端 Cookie 对该曲无权限，                         // 明确提示用户，避免误以为「客户端又坏了 / 又只能听 30 秒」。                         if (actual > 0L && isPreview && playSourceIndex >= playSources.size) {                             _toastMessage.value = "该歌曲为会员专享，当前音源仅提供约 ${actual / 1000} 秒试听"                         }
@@ -1752,6 +1789,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     updateMediaSession(true)
                     // 拿到完整版：计数归零，并为「下一首」预解析直链（自动切歌零等待）
                     previewRetryCount = 0
+                    playFailStreak = 0
                     prefetchNext(song)
                 }
                 setOnCompletionListener {
@@ -1767,12 +1805,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     // 网易云的 outer 接口只能用网易云自己的 id。
                     // 别的平台（B站/酷我/酷狗…）的 id 丢进去，网易云会返回"同 id 的另一首歌"，
                     // 于是歌名/封面/歌词都对、声音却完全是另一首歌。非网易云一律跳过。
-                    if (!song.source.equals("netease", ignoreCase = true)) {
+                    if (!song.source.equals("netease", ignoreCase = true) || neteaseFallbackTried) {
+                        playFailStreak++
+                        if (playFailStreak >= 3) {
+                            // 连续三首都拿不到音源 → 停止自动跳过，交给用户决定。
+                            // 否则会一路狂跳，而且跳到的多半也是没音源的歌。
+                            _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
+                            _isPlaying.value = false
+                            return@setOnErrorListener true
+                        }
                         _toastMessage.value = "这首在免费音源里没找到，已跳过"
                         _isPlaying.value = false
                         playNext()
                         return@setOnErrorListener true
                     }
+                    neteaseFallbackTried = true
                     try {
                         player.setDataSource(apiService.getFallbackUrl(song.id))
                         player.prepareAsync()
@@ -1815,9 +1862,32 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             if (!ok) {
                 _toastMessage.value = "播放失败，该歌曲可能受版权限制"
                 _isPlaying.value = false
-            } else if (_isLoggedIn.value) {
-                if (_remainingQuota.value > 0) useQuota()
-                else _toastMessage.value = "额度已用完，请观看广告获取额度"
+            } else {
+                // ── 邪修兜底：自动触发一遍播放 ──
+                // 手动点播放「几秒就出声」，是因为它对已就绪的播放器执行了一次 mp.start()；
+                // 自动路径偶发停在「已 prepared 但没真正出声」的状态。5 秒后检查一次：
+                // 还没在播就自动补上手动播放的那一下（只补一次；歌已切走就不补）。
+                autoPlayKickJob?.cancel()
+                autoPlayKickJob = viewModelScope.launch {
+                    for (attempt in 1..5) {
+                        kotlinx.coroutines.delay(3_000L)
+                        if (_currentSong.value?.id != song.id) return@launch
+                        val mp0 = mediaPlayer ?: return@launch
+                        val playing = runCatching { mp0.isPlaying }.getOrDefault(false)
+                        if (playing) return@launch
+                        // 无条件 start()：对已在播放的播放器是无害的 no-op，
+                        // 对「已 prepared 却停在暂停态」的播放器，这正是手动点一次播放键的效果。
+                        runCatching { mp0.start() }
+                        _isPlaying.value = true
+                        startProgressTracking()
+                        updateMediaSession(true)
+                        android.util.Log.i("MINova-Play", "auto-kick: attempt " + attempt + " song=" + song.name)
+                    }
+                }
+                if (_isLoggedIn.value) {
+                    if (_remainingQuota.value > 0) useQuota()
+                    else _toastMessage.value = "额度已用完，请观看广告获取额度"
+                }
             }
             // 歌词与通知元数据已在本协程开头与直链解析并行发起（见上），此处不再串行等待
         }
@@ -1840,7 +1910,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun playNext() {
         val cur = _currentSong.value ?: return
-        val q = _playQueue.value.ifEmpty { _fallbackQueue.value }.ifEmpty { _searchResults.value }
+        // 队列优先级：① 当前队列里确实有这首歌 → 用它；
+        //            ② 这首歌来自搜索结果 → 用搜索结果（按展示顺序）；
+        //            ③ 才轮到推荐页的兜底池。
+        // 之前第 ③ 步排在前面，导致「搜索结果里点歌、失败后却开始在推荐池里乱放」。
+        val q = run {
+            val pq = _playQueue.value
+            when {
+                pq.isNotEmpty() && pq.any { it.id == cur.id } -> pq
+                _searchResults.value.any { it.id == cur.id } -> _searchResults.value.asReversed()
+                else -> _fallbackQueue.value.ifEmpty { _searchResults.value }
+            }
+        }
         if (q.isEmpty()) return
         val i = q.indexOfFirst { it.id == cur.id }
         // 找不到就从头放；到末尾回到第一首（列表循环）
@@ -1850,7 +1931,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun playPrevious() {
         val cur = _currentSong.value ?: return
-        val q = _playQueue.value.ifEmpty { _fallbackQueue.value }.ifEmpty { _searchResults.value }
+        // 队列优先级：① 当前队列里确实有这首歌 → 用它；
+        //            ② 这首歌来自搜索结果 → 用搜索结果（按展示顺序）；
+        //            ③ 才轮到推荐页的兜底池。
+        // 之前第 ③ 步排在前面，导致「搜索结果里点歌、失败后却开始在推荐池里乱放」。
+        val q = run {
+            val pq = _playQueue.value
+            when {
+                pq.isNotEmpty() && pq.any { it.id == cur.id } -> pq
+                _searchResults.value.any { it.id == cur.id } -> _searchResults.value.asReversed()
+                else -> _fallbackQueue.value.ifEmpty { _searchResults.value }
+            }
+        }
         if (q.isEmpty()) return
         val i = q.indexOfFirst { it.id == cur.id }
         val prev = if (i > 0) q[i - 1] else q.lastOrNull()
@@ -4338,22 +4430,23 @@ fun MusicSearchTab(
         //   ③ 时长已知的优先
         //   ④ 歌名更短优先（更接近原版标题）
         //   ⑤ id + source 兜底 → 同一组搜索结果每次顺序完全一致
-        val sortedSearchResults = remember(searchResults) {
-            // 关键：**必须用稳定排序**（只按 垃圾版本 + 来源优先级 两个键），
-            // 这样每个音源返回结果**各自的相关度顺序会被保留** ——
-            // 各源都把最相关/最可能的原唱放在最前面，原唱因此会稳定排在前列。
-            // 之前额外加的「歌名更短」「id 兜底」会把这个顺序打乱，所以必须去掉。
+        // 排序方向：默认倒序，用户可在列表顶部的标签里手动切成正序。
+        var searchSortDesc by remember { mutableStateOf(false) }
+        val sortedSearchResults = remember(searchResults, searchSortDesc) {
+            // 稳定排序：只按 垃圾版本 + 来源优先级 两个键，
+            // 这样每个音源各自的相关度顺序会被保留（原唱通常在各源第一条）。
             val srcRank = mapOf(
                 "kuwo" to 0, "migu" to 1, "kugou" to 2, "qq" to 3, "netease" to 4,
                 "bilibili" to 5, "soda" to 6, "fivesing" to 7, "joox" to 8,
                 "jamendo" to 9, "qianqian" to 10
             )
-            searchResults.sortedWith(
+            val ordered = searchResults.sortedWith(
                 compareBy(
                     { if (isJunkVersion(it)) 1 else 0 },
                     { srcRank[it.source.lowercase()] ?: 11 }
                 )
             )
+            if (searchSortDesc) ordered.asReversed() else ordered
         }
 
         Box(modifier = resultModifier) {
@@ -4427,6 +4520,38 @@ fun MusicSearchTab(
                             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            item {
+                                // 排序标签：默认倒序，点一下可切正序（用户手动调整）
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    listOf("倒序" to true, "正序" to false).forEach { (label, desc) ->
+                                        val on = searchSortDesc == desc
+                                        val bg by animateColorAsState(
+                                            targetValue = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                            animationSpec = tween(220), label = "sortBg"
+                                        )
+                                        val fg by animateColorAsState(
+                                            targetValue = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            animationSpec = tween(220), label = "sortFg"
+                                        )
+                                        val pad by animateDpAsState(
+                                            targetValue = if (on) 14.dp else 12.dp,
+                                            animationSpec = spring(dampingRatio = 0.7f, stiffness = 500f), label = "sortPad"
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(50))
+                                                .background(bg)
+                                                .clickable { searchSortDesc = desc }
+                                                .padding(horizontal = pad, vertical = 6.dp)
+                                        ) {
+                                            Text(label, fontSize = 12.sp, color = fg)
+                                        }
+                                    }
+                                }
+                            }
                             itemsIndexed(
                                 items = sortedSearchResults,
                                 // 去重键带上版本标识后，同一首歌的多个版本会同时出现在列表里，
@@ -4679,7 +4804,7 @@ fun SettingsThemeTab(
                     index = 6, count = 10,
                     icon = Icons.Rounded.Equalizer,
                     title = "音乐偏好",
-                    summary = "音乐类型 · 关注艺人（参与推荐打分）",
+                    summary = "音乐类型 关注艺人（参与推荐打分）",
                     onClick = { showTastePrefs = true }
                 )
                 // 与「暗色模式」同样的卡片样式
@@ -4776,7 +4901,7 @@ fun SettingsThemeTab(
                     Spacer(Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text("音乐偏好", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text("音乐类型 · 关注艺人（参与推荐打分）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("音乐类型 关注艺人（参与推荐打分）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -7812,6 +7937,27 @@ fun MD3StyleBottomSheetConsole(
  * 它们的歌名干干净净，只按歌名判定就会被当成"正常版本"顶在最上面，
  * 而真正的原唱被挤到最底下。所以歌手名也要拆词检查。
  */
+/**
+ * 过滤明显不是「音乐」的搜索结果。
+ *
+ * 网易云曲库会混入有声书 / 说书 / 评书 / 电台 / 播客 以及「第 1005 章」这类章节条目，
+ * 用户搜的是音乐，这些必须挡掉（表现为「搜出来一堆说书的」）。
+ */
+fun isLikelyMusic(song: Song): Boolean {
+    val hay = (song.name + " " + song.artist + " " + song.album).lowercase()
+    val junk = listOf(
+        "有声", "听书", "说书", "评书", "相声", "广播剧", "播客", "电台", "播音",
+        "朗读", "诵读", "连载", "完结", "全集", "更新至", "精讲", "解读", "讲书",
+        "拆书", "共读", "书评", "导读", "讲座", "公开课", "百家讲坛",
+        "睡前故事", "儿童故事", "演播", "podcast"
+    )
+    if (junk.any { hay.contains(it) }) return false
+    // 第123章 / 第12集 / 第3回 这类章节型条目
+    if (Regex("第\\s*[0-9零一二三四五六七八九十百千]{1,6}\\s*[章节集回期话卷]")
+            .containsMatchIn(song.name)) return false
+    return true
+}
+
 fun isJunkVersion(song: Song): Boolean {
     // 歌名/专辑：沿用 parseVersionTag（只在"版本标注可能出现的位置"匹配，不会误伤 Believe/Discovery）
     if (parseVersionTag(song.name, song.album) != null) return true
@@ -7827,7 +7973,7 @@ fun isJunkVersion(song: Song): Boolean {
     // 拉丁缩写必须按**词**匹配：之前的 t.contains("dj") 会把 Adjoa 之类正常歌手误杀。
     // 词首不能是字母/数字（山河DJ ✔、Adjoa ✘）；词尾允许数字（DJ2024 ✔）。
     val junkWordRe = Regex("(?i)(?<![a-z0-9])(dj|remix|cover|sped|slowed|8d)(?![a-z])")
-    val tokens = artist.split('/', '、', '&', ',', '，', ';', '；', '-', '_', ' ', '·')
+    val tokens = artist.split('/', '、', '&', ',', '，', ';', '；', '-', '_', ' ', ' ')
         .map { it.trim() }.filter { it.isNotEmpty() }
     return tokens.any { t -> junkCn.any { t.contains(it) } || junkWordRe.containsMatchIn(t) }
 }
@@ -8838,13 +8984,19 @@ private fun MaintenanceTopBanner(
 ) {
     // 外层 Box 不处理任何手势 → 除横幅自身区域外，点击全部穿透到下面的界面
     Box(modifier = Modifier.fillMaxSize()) {
+        // auto-hide：横幅只是提示，6 秒后自动消失，避免一直压住顶部的退出等按钮
+        LaunchedEffect(info.signature()) {
+            kotlinx.coroutines.delay(6_000)
+            onDismiss()
+        }
+
         Surface(
             color = MaterialTheme.colorScheme.secondaryContainer,
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
             shadowElevation = 2.dp,
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .fillMaxWidth()
+                .padding(horizontal = 10.dp)
                 .statusBarsPadding()
         ) {
             Row(
@@ -8899,6 +9051,18 @@ data class ChangelogEntry(val version: String, val items: List<String>)
 
 /** 各版本改动要点（只写项目里真实存在 / 真实修过的内容）。 */
 private val CHANGELOG: List<ChangelogEntry> = listOf(
+        ChangelogEntry(
+        version = "1.3.2",
+                items = listOf(
+            "修复自动播放偶发等待数十秒才开始的问题：起播未响应时将自动触发一次播放",
+            "修复部分歌曲被误判为试听片段导致反复换源、迟迟不播的问题",
+            "修复搜索结果缺少原曲的问题：搜索改用网易云曲库，点击播放时再匹配其他平台音源",
+            "修复推荐页点「下一首」跳到不相关歌曲的问题：播放队列跟随当前分区",
+            "修复「每日 30 首」反复刷新的问题：同一天内保持固定",
+            "修复搜索列表顺序无法调整的问题，现在可在倒序与正序之间切换（默认倒序）",
+            "优化自动切歌的响应速度：播放器预热与预取进一步完善"
+        )
+    ),
     ChangelogEntry(
         version = "1.3.1",
         items = listOf(
@@ -8911,7 +9075,7 @@ private val CHANGELOG: List<ChangelogEntry> = listOf(
             "跨源匹配放宽：歌手一方为空时不再误判「在免费歌源里没找到」",
             "新增停服维护提示：普通维护顶部横幅、重要维护弹窗、紧急停机全屏阻断",
             "「更新日志」入口位于「账号」页",
-            "移除沉浸模式；开源协议为 MIT"
+            "移除沉浸模式；开源协议为 GPL-3.0"
         )
     ),
     ChangelogEntry(

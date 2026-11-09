@@ -116,8 +116,8 @@ private fun Modifier.enterAnimation(staggerIndex: Int = -1): Modifier = motionEn
  *
  * 版式对齐参考图：
  *  - 顶部两张并列大卡（For You / Daily 30）：大标题 + 右上封面 + 底部歌名/歌手 + 白色圆形播放键
- *      · 点「卡面」→ 进入该卡的歌曲列表（大卡点进去才显示列表）
- *      · 点「播放键」→ 直接播放第一首
+ *      点「卡面」→ 进入该卡的歌曲列表（大卡点进去才显示列表）
+ *      点「播放键」→ 直接播放第一首
  *  - 分区标题：大号加粗 + 可选 💗 + 黑色实心播放键 + 右侧灰色 X（隐藏该分区）
  *  - 歌曲行：左封面 / 歌名(粗) + 歌手 / 右侧心形+计数 / 再右侧三列小封面（后续待播）
  *  - 适配双风格：MD3 用 surfaceContainer，液态玻璃用半透明观感
@@ -339,19 +339,39 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
             val today = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date())
             val savedDate = RecommendPrefs.dailyDate(ctx)
             val byId = list.associateBy { it.id }
-            val dailyPick: List<Song> = if (savedDate == today) {
-                val restored = RecommendPrefs.dailyIds(ctx).mapNotNull { byId[it] }
-                if (restored.size >= 5) restored
-                else diversify(ranked, minOf(30, maxOf(6, ranked.size / 2))).also {
-                    RecommendPrefs.saveDaily(ctx, today, it.map { s -> s.id })
+            // 「每日 30 首」必须当天稳定：优先用本地缓存的歌曲本体（不依赖本次候选池）。
+            // 之前只存 id、靠实时池子还原 —— 池子一变就还原不出来，于是每次进来都重新生成，
+            // 用户看到的就是「老刷新」。现在生成后把歌曲列表整个持久化（saveDailyCache）。
+            val cachedDailyAll = RecommendPrefs.getDailyCache(ctx)
+            val dailyPick: List<Song> = when {
+                savedDate == today && cachedDailyAll.isNotEmpty() -> cachedDailyAll
+                savedDate == today -> {
+                    val restored = RecommendPrefs.dailyIds(ctx).mapNotNull { byId[it] }
+                    if (restored.size >= 5) restored
+                    else diversify(ranked, minOf(30, maxOf(6, ranked.size / 2))).also {
+                        RecommendPrefs.saveDaily(ctx, today, it.map { s -> s.id })
+                        RecommendPrefs.saveDailyCache(ctx, it)
+                    }
                 }
-            } else {
-                diversify(ranked, minOf(30, maxOf(6, ranked.size / 2))).also {
+                else -> diversify(ranked, minOf(30, maxOf(6, ranked.size / 2))).also {
                     RecommendPrefs.saveDaily(ctx, today, it.map { s -> s.id })
+                    RecommendPrefs.saveDailyCache(ctx, it)
                 }
             }
-            val cachedDaily = RecommendPrefs.getDailyCache(ctx)
-            val dailyList = if (cachedDaily.isEmpty()) dailyPick else cachedDaily
+            // 不足 30 首时用候选池补足（diversify 同歌手上限会减员，导致 28/29 首）
+            val dailyList = run {
+                var pick = dailyPick.ifEmpty { RecommendPrefs.getDailyCache(ctx) }
+                if (pick.size < 30) {
+                    val have = pick.map { it.id }.toHashSet()
+                    val extra = ranked.filter { it.id !in have }.take(30 - pick.size)
+                    if (extra.isNotEmpty()) {
+                        pick = pick + extra
+                        RecommendPrefs.saveDaily(ctx, today, pick.map { s -> s.id })
+                        RecommendPrefs.saveDailyCache(ctx, pick)
+                    }
+                }
+                pick
+            }
             // 关键修复：池子为空（网络失败）时不要把已显示的每日 30 覆盖成空列表 ——
             // 之前每次 distribute 都无条件赋值，一次搜索失败首页「每日 30 首」就变 0。
             if (dailyList.isNotEmpty()) {
@@ -442,9 +462,9 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
     val cardKey = openedCard
     if (cardKey != null) {
         val detail = if (cardKey == "foryou") {
-            Triple("猜你喜欢", "For You · 沉浸刷歌", forYou)
+            Triple("猜你喜欢", "For You 沉浸刷歌", forYou)
         } else {
-            Triple("每日 30 首", "Daily 30 · 为你挑选", daily)
+            Triple("每日 30 首", "Daily 30 为你挑选", daily)
         }
         BackHandler { openedCard = null }
         CardDetailPage(
@@ -457,7 +477,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
             isPlaying = isPlayingNow,
             onBack = { openedCard = null },
             onPlayAll = { detail.third.firstOrNull()?.let { s -> viewModel.playSong(s, detail.third) } },
-            onPlay = { viewModel.playSong(it) }
+            onPlay = { viewModel.playSong(it, detail.third) }
         )
         return
     }
@@ -478,7 +498,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        if (seedTitle.isBlank()) "为你精选 · 大家都爱听" else "根据你的《$seedTitle》推荐",
+                        if (seedTitle.isBlank()) "为你精选 大家都爱听" else "根据你的《$seedTitle》推荐",
                         fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis
                     )
@@ -505,7 +525,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     colors = listOf(MaterialTheme.colorScheme.primaryContainer),
                     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                     onClick = { openedCard = "foryou" },
-                    onPlay = { forYou.firstOrNull()?.let { viewModel.playSong(it) } }
+                    onPlay = { forYou.firstOrNull()?.let { viewModel.playSong(it, forYou) } }
                 )
 
                 BigCard(
@@ -517,7 +537,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     colors = listOf(MaterialTheme.colorScheme.secondaryContainer),
                     contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     onClick = { openedCard = "daily" },
-                    onPlay = { daily.firstOrNull()?.let { viewModel.playSong(it) } }
+                    onPlay = { daily.firstOrNull()?.let { viewModel.playSong(it, daily) } }
                 )
             }
         }
@@ -540,7 +560,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                 SectionHeader(
                     title = if (seedTitle.isBlank()) "为你精选💗" else "听「$seedTitle」也会喜欢💗",
                     enterIndex = 2,
-                    onPlayAll = { similar.firstOrNull()?.let { viewModel.playSong(it) } },
+                    onPlayAll = { similar.firstOrNull()?.let { viewModel.playSong(it, similar) } },
                     onHide = { hiddenSections = hiddenSections + "similar" }
                 )
             }
@@ -549,7 +569,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     songs = similar,
                     favoriteIds = favoriteIds,
                     playCounts = playCounts,
-                    onPlay = { viewModel.playSong(it) },
+                    onPlay = { viewModel.playSong(it, similar) },
                     onToggleFavorite = { s ->
                         if (s.id in favoriteIds) viewModel.removeFromFavorites(s.id)
                         else viewModel.addToFavorites(s)
@@ -564,7 +584,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                 SectionHeader(
                     title = "大家都在听",
                     enterIndex = 3,
-                    onPlayAll = { everyone.firstOrNull()?.let { viewModel.playSong(it) } },
+                    onPlayAll = { everyone.firstOrNull()?.let { viewModel.playSong(it, everyone) } },
                     onHide = { hiddenSections = hiddenSections + "everyone" }
                 )
             }
@@ -573,7 +593,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     songs = everyone,
                     favoriteIds = favoriteIds,
                     playCounts = playCounts,
-                    onPlay = { viewModel.playSong(it) },
+                    onPlay = { viewModel.playSong(it, everyone) },
                     onToggleFavorite = { s ->
                         if (s.id in favoriteIds) viewModel.removeFromFavorites(s.id)
                         else viewModel.addToFavorites(s)
@@ -588,7 +608,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                 SectionHeader(
                     title = "这些反复听过的歌一定值得收藏",
                     enterIndex = 4,
-                    onPlayAll = { repeated.firstOrNull()?.let { viewModel.playSong(it) } },
+                    onPlayAll = { repeated.firstOrNull()?.let { viewModel.playSong(it, repeated) } },
                     onHide = { hiddenSections = hiddenSections + "repeated" }
                 )
             }
@@ -597,7 +617,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     songs = repeated,
                     favoriteIds = favoriteIds,
                     playCounts = playCounts,
-                    onPlay = { viewModel.playSong(it) },
+                    onPlay = { viewModel.playSong(it, repeated) },
                     onToggleFavorite = { s ->
                         if (s.id in favoriteIds) viewModel.removeFromFavorites(s.id)
                         else viewModel.addToFavorites(s)
@@ -621,7 +641,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     songs = interest,
                     favoriteIds = favoriteIds,
                     playCounts = playCounts,
-                    onPlay = { viewModel.playSong(it) },
+                    onPlay = { viewModel.playSong(it, similar) },
                     onToggleFavorite = { s ->
                         if (s.id in favoriteIds) viewModel.removeFromFavorites(s.id)
                         else viewModel.addToFavorites(s)
@@ -784,7 +804,7 @@ private fun CardDetailPage(
                             )
                             val heat = playCounts[song.id] ?: 0
                             Text(
-                                song.artist + if (heat > 0) " · ${formatHeat(heat.toLong())}" else "",
+                                song.artist + if (heat > 0) " ${formatHeat(heat.toLong())}" else "",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -1357,7 +1377,16 @@ internal object RecommendPrefs {
 
     fun getDailyCache(c: android.content.Context): List<Song> {
         val json = sp(c).getString(k(c, "daily_cache"), "") ?: ""
-        return if (json.isBlank()) emptyList() else gson.fromJson(json, SongListType::class.java) as List<Song>
+        if (json.isBlank()) return emptyList()
+        return try {
+            // 必须传 Type 本身。之前写成 SongListType::class.java，Gson 会把「匿名 TypeToken 类」
+            // 当成目标类型去解析，于是抛 Expected BEGIN_OBJECT but was BEGIN_ARRAY，
+            // 直接把首页打崩（历史脏缓存更容易触发）。这里同时做兜底：解析失败就清掉这条缓存。
+            (gson.fromJson(json, SongListType) as? List<Song>).orEmpty()
+        } catch (e: Exception) {
+            runCatching { sp(c).edit().remove(k(c, "daily_cache")).apply() }
+            emptyList()
+        }
     }
 
     private val SongListType = object : com.google.gson.reflect.TypeToken<List<Song>>() {}.type
