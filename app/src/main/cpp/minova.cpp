@@ -208,6 +208,345 @@ void forEachLine(const std::string& s, Fn fn) {
 
 }  // namespace
 
+// ===========================================================================
+// 歌曲过滤 / 去重 key（Kotlin 逻辑逐字移植）。规则来源（勿漂移）：
+//   isLikelyMusic   = MainActivity.kt  isLikelyMusic()  （junk 词表 + 「第N章」正则）
+//   isJunkVersion   = MainActivity.kt  isJunkVersion()  （parseVersionTag + 歌手拆词）
+//   parseVersionTag = DiscoverScreen.kt parseVersionTag()（括号/破折号/专辑定位 + 词表）
+//   去重 key        = MainActivity.kt  搜索合并处
+//                     (name + "|" + artist).lowercase() + "|" + parseVersionTag(name, album)
+// 字符串按 JNI Modified UTF-8 字节处理（与文件头既有约定一致）。
+// lowercase 为 Kotlin invariant lowercase()（= toLowerCase(ROOT)）的覆盖子集：
+// ASCII / Latin-1 / 全角 / 希腊 / 西里尔 / İ；希腊「词尾 ς」上下文规则未实现
+// （Σ 恒映射 σ）——中文曲库不涉及；一致性抽查覆盖全部词表逐词验证。
+// ===========================================================================
+namespace {
+
+inline size_t u8CharLen(unsigned char c) {
+    return (c & 0xE0) == 0xE0 ? 3u : ((c & 0xC0) == 0xC0 ? 2u : 1u);
+}
+
+inline bool u8Eq(const std::string& s, size_t i, const char* lit, size_t n) {
+    return i + n <= s.size() && std::memcmp(s.data() + i, lit, n) == 0;
+}
+
+inline bool u8Has(const std::string& hay, const char* needle) {
+    return hay.find(needle) != std::string::npos;
+}
+
+// Kotlin String.lowercase() 覆盖子集（见上）。
+std::string ktLowercase(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c >= 'A' && c <= 'Z') { out += static_cast<char>(c + 0x20); ++i; continue; }
+        if (c == 0xC3 && i + 1 < n) {                       // Latin-1 U+00C0-00FF
+            const unsigned char c2 = static_cast<unsigned char>(s[i + 1]);
+            if (c2 >= 0x80 && c2 <= 0x9E && c2 != 0x97) {   // U+00C0-00DE（除 ×）
+                out += static_cast<char>(0xC3);
+                out += static_cast<char>(c2 + 0x20);
+                i += 2; continue;
+            }
+        }
+        if (c == 0xC4 && i + 1 < n &&                       // İ → i + U+0307
+            static_cast<unsigned char>(s[i + 1]) == 0xB0) {
+            out += 'i'; out += static_cast<char>(0xCC); out += static_cast<char>(0x87);
+            i += 2; continue;
+        }
+        if (c == 0xCE && i + 1 < n) {                       // Greek
+            const unsigned char c2 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char m = 0;
+            if (c2 == 0x86) m = 0xAC;                         // Ά → ά
+            else if (c2 >= 0x88 && c2 <= 0x8A) m = static_cast<unsigned char>(c2 + 0x24);
+            else if (c2 == 0x8C) m = 0xCC;                    // Ό → ό
+            else if (c2 >= 0x8E && c2 <= 0x8F) m = static_cast<unsigned char>(c2 + 0x3F);
+            else if (c2 >= 0x91 && c2 <= 0xA1) m = static_cast<unsigned char>(c2 + 0x20);
+            else if (c2 >= 0xA3 && c2 <= 0xAB) m = static_cast<unsigned char>(c2 + 0x20);
+            if (m) {
+                out += static_cast<char>(0xCE); out += static_cast<char>(m);
+                i += 2; continue;
+            }
+        }
+        if (c == 0xD0 && i + 1 < n) {                       // Cyrillic
+            const unsigned char c2 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char m = 0;
+            if (c2 >= 0x80 && c2 <= 0x8F) m = static_cast<unsigned char>(c2 + 0x50);
+            else if (c2 >= 0x90 && c2 <= 0xAF) m = static_cast<unsigned char>(c2 + 0x20);
+            if (m) {
+                out += static_cast<char>(0xD0); out += static_cast<char>(m);
+                i += 2; continue;
+            }
+        }
+        if (c == 0xEF && i + 2 < n &&                       // Ａ-Ｚ → ａ-ｚ
+            static_cast<unsigned char>(s[i + 1]) == 0xBC) {
+            const unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c2 >= 0xA1 && c2 <= 0xBA) {
+                // U+FF21-FF3A → U+FF41-FF5A：跨 0x3F 边界 —— 中间字节 BC→BD、
+                // 尾字节 -0x20（如 Ｌ=EF BC AC → ｌ=EF BD 8C；写错会变成 「，」）
+                out += static_cast<char>(0xEF); out += static_cast<char>(0xBD);
+                out += static_cast<char>(c2 - 0x20);
+                i += 3; continue;
+            }
+        }
+        out += s[i]; ++i;
+    }
+    return out;
+}
+
+// Kotlin String.isBlank()：全 isWhitespace（含 U+3000 等）或空。
+inline bool ktIsBlank(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t adv = 0;
+        if (!ktIsWhitespaceAt(reinterpret_cast<const unsigned char*>(s.data()), i, s.size(), &adv))
+            return false;
+        i += adv;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 等价 Regex("第\\s*[0-9零一二三四五六七八九十百千]{1,6}\\s*[章节集回期话卷]")
+// .containsMatchIn(name)。注意 Java \s 仅 ASCII 空白（不含 U+3000/U+00A0）。
+// ---------------------------------------------------------------------------
+inline bool isRegexSpace(unsigned char c) {
+    return c == 0x20 || (c >= 0x09 && c <= 0x0D);
+}
+
+inline bool isChapterNumAt(const std::string& s, size_t i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) return c >= '0' && c <= '9';
+    static const char* const kNums[] = {
+        "零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "百", "千"
+    };
+    for (const char* k : kNums) if (u8Eq(s, i, k, 3)) return true;
+    return false;
+}
+
+inline bool isChapterUnitAt(const std::string& s, size_t i) {
+    static const char* const kUnits[] = { "章", "节", "集", "回", "期", "话", "卷" };
+    for (const char* k : kUnits) if (u8Eq(s, i, k, 3)) return true;
+    return false;
+}
+
+bool chapterContains(const std::string& s) {
+    static const char kDi[] = "第";
+    size_t p = s.find(kDi);
+    while (p != std::string::npos) {
+        size_t i = p + 3;
+        while (i < s.size() && isRegexSpace(static_cast<unsigned char>(s[i]))) ++i;
+        for (int k = 1; k <= 6; ++k) {                  // {1,6}：存在性 → 逐个 k 试
+            size_t j = i;
+            bool ok = true;
+            for (int c = 0; c < k; ++c) {
+                if (j >= s.size() || !isChapterNumAt(s, j)) { ok = false; break; }
+                j += u8CharLen(static_cast<unsigned char>(s[j]));
+            }
+            if (!ok) break;                             // 取不满 k 个 → 更大 k 也不可能
+            while (j < s.size() && isRegexSpace(static_cast<unsigned char>(s[j]))) ++j;
+            if (j < s.size() && isChapterUnitAt(s, j)) return true;
+        }
+        p = s.find(kDi, p + 3);
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// 等价 DiscoverScreen.parseVersionTag(name, album)：返回 tag（"" = null）。
+// ---------------------------------------------------------------------------
+inline bool isBracketOpenAt(const std::string& s, size_t i, size_t* len) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c == '(' || c == '[') { *len = 1; return true; }
+    if (u8Eq(s, i, "（", 3)) { *len = 3; return true; }
+    if (u8Eq(s, i, "【", 3)) { *len = 3; return true; }
+    return false;
+}
+
+inline bool isBracketCloseAt(const std::string& s, size_t i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c == ')' || c == ']') return true;
+    return u8Eq(s, i, "）", 3) || u8Eq(s, i, "】", 3);
+}
+
+std::string parseVersionTagCpp(const std::string& name, const std::string& album) {
+    const std::string lower = ktLowercase(name);
+
+    // 1) 括号内容：[（(\[【] ([^）)\]】]{1,24}) [）)\]】]，组1 join " "
+    //    （{1,24} 计 UTF-16 单元 = Modified UTF-8 非续字节）
+    std::string brackets;
+    {
+        const size_t n = lower.size();
+        size_t i = 0;
+        while (i < n) {
+            size_t ol = 0;
+            if (!isBracketOpenAt(lower, i, &ol)) { ++i; continue; }
+            size_t j = i + ol;
+            size_t units = 0;
+            while (j < n && units < 24) {
+                if (isBracketCloseAt(lower, j)) break;
+                j += u8CharLen(static_cast<unsigned char>(lower[j]));
+                ++units;
+            }
+            if (units >= 1 && j < n && isBracketCloseAt(lower, j)) {
+                brackets.append(lower, i + ol, j - (i + ol));
+                brackets += ' ';
+                i = j + u8CharLen(static_cast<unsigned char>(lower[j]));
+            } else {
+                i += ol;  // 无匹配 → 前进一个单元重试（与 Java 逐位置语义一致）
+            }
+        }
+    }
+
+    // 2) tail：lower.substringAfterLast("-", "").substringAfterLast("–", "").trim()
+    //    ⚠️ Kotlin 链式语义：第二段的 missingDelimiterValue 是 "" —— 最后一个 '-'
+    //    之后若没有 en dash「–」，**整个 tail 丢弃为 ""**（不是保留 '-' 后的串）。
+    //    tail 非空 ⟺ 存在 '-' 且其后还有 '–'，取最后一个 '–' 之后的 trim。
+    std::string tail;
+    {
+        const size_t dash = lower.rfind('-');
+        if (dash != std::string::npos) {
+            const std::string s2 = lower.substr(dash + 1);
+            const size_t end = s2.rfind("–");
+            if (end != std::string::npos)
+                tail = ktTrim(reinterpret_cast<const unsigned char*>(s2.data()) + end + 3,
+                              s2.size() - end - 3);
+        }
+    }
+
+    // 3) hay = (inBrackets + " " + tail + " " + album.lowercase()).trim()
+    std::string hay = brackets;
+    hay += ' '; hay += tail; hay += ' '; hay += ktLowercase(album);
+    hay = ktTrim(reinterpret_cast<const unsigned char*>(hay.data()), hay.size());
+
+    auto has = [&hay](std::initializer_list<const char*> keys) -> bool {
+        for (const char* k : keys) if (u8Has(hay, k)) return true;
+        return false;
+    };
+    if (has({"dj版", "dj 版", "remix", "dj"})) return "DJ版";
+    if (has({"live", "演唱会", "concert"})) return "Live";
+    if (has({"翻唱", "cover", "cover版"})) return "翻唱";
+    if (has({"伴奏", "instrumental", "accompaniment", "off vocal"})) return "伴奏";
+    if (has({"纯音乐"})) return "纯音乐";
+    return "";
+}
+
+// 等价 Regex("(?i)(?<![a-z0-9])(dj|remix|cover|sped|slowed|8d)(?![a-z])")
+// containsMatchIn(token)（token 已 lowercase；(?i) 对 ASCII 字母双向保守对齐）。
+inline bool junkWordMatch(const std::string& t) {
+    static const char* const kWords[] = { "dj", "remix", "cover", "sped", "slowed", "8d" };
+    static const size_t kLens[] = { 2, 5, 5, 4, 6, 2 };
+    const size_t n = t.size();
+    for (size_t q = 0; q < n; ++q) {
+        for (int w = 0; w < 6; ++w) {
+            const size_t wl = kLens[w];
+            if (q + wl > n || std::memcmp(t.data() + q, kWords[w], wl) != 0) continue;
+            if (q > 0) {  // (?<![a-z0-9])：前一 UTF-16 单元是 ASCII 字母/数字 → 失败
+                const unsigned char pc = static_cast<unsigned char>(t[q - 1]);
+                if (pc < 0x80 && ((pc >= 'a' && pc <= 'z') || (pc >= 'A' && pc <= 'Z') ||
+                                  (pc >= '0' && pc <= '9')))
+                    continue;
+            }
+            if (q + wl < n) {  // (?![a-z])：后一单元是 ASCII 字母 → 失败（数字允许）
+                const unsigned char nc = static_cast<unsigned char>(t[q + wl]);
+                if (nc < 0x80 && ((nc >= 'a' && nc <= 'z') || (nc >= 'A' && nc <= 'Z')))
+                    continue;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// 等价 MainActivity.isLikelyMusic(song)
+bool isLikelyMusicCpp(const std::string& name, const std::string& artist, const std::string& album) {
+    static const char* const kMusicJunk[] = {
+        "有声", "听书", "说书", "评书", "相声", "广播剧", "播客", "电台", "播音",
+        "朗读", "诵读", "连载", "完结", "全集", "更新至", "精讲", "解读", "讲书",
+        "拆书", "共读", "书评", "导读", "讲座", "公开课", "百家讲坛",
+        "睡前故事", "儿童故事", "演播", "podcast"
+    };
+    std::string hay = name;
+    hay += ' '; hay += artist; hay += ' '; hay += album;
+    hay = ktLowercase(hay);
+    for (const char* w : kMusicJunk)
+        if (u8Has(hay, w)) return false;
+    if (chapterContains(name)) return false;
+    return true;
+}
+
+// 等价 MainActivity.isJunkVersion(song)
+bool isJunkVersionCpp(const std::string& name, const std::string& artist, const std::string& album) {
+    if (!parseVersionTagCpp(name, album).empty()) return true;
+    const std::string art = ktLowercase(artist);
+    if (ktIsBlank(art)) return false;
+    static const char* const kJunkCn[] = {
+        "混音", "翻唱", "加速", "减速", "降调", "升调", "抖音", "铃声",
+        "伴奏", "纯音乐", "钢琴", "吉他", "童声", "女声版", "男声版",
+        "合唱", "清唱", "戏腔", "串烧", "改版", "改编", "组曲", "重制"
+    };
+    // split('/', '、', '&', ',', '，', ';', '；', '-', '_', ' ', ' ') → trim → 非空
+    const size_t n = art.size();
+    size_t i = 0;
+    while (i <= n) {
+        size_t j = i;
+        while (j < n) {
+            const unsigned char c = static_cast<unsigned char>(art[j]);
+            if (c == '/' || c == '&' || c == ',' || c == ';' || c == '-' || c == '_' || c == ' ')
+                break;
+            if (u8Eq(art, j, "、", 3) || u8Eq(art, j, "，", 3) || u8Eq(art, j, "；", 3))
+                break;
+            j += u8CharLen(c);
+        }
+        const std::string tok =
+            ktTrim(reinterpret_cast<const unsigned char*>(art.data()) + i, j - i);
+        if (!tok.empty()) {
+            for (const char* w : kJunkCn)
+                if (u8Has(tok, w)) return true;
+            if (junkWordMatch(tok)) return true;
+        }
+        if (j >= n) break;
+        i = j + u8CharLen(static_cast<unsigned char>(art[j]));
+    }
+    return false;
+}
+
+// 等价 MainActivity 搜索合并处的去重键：
+// (name + "|" + artist).lowercase() + "|" + (parseVersionTag(name, album) ?: "")
+std::string dedupKeyCpp(const std::string& name, const std::string& artist,
+                        const std::string& album) {
+    std::string k = name;
+    k += '|'; k += artist;
+    k = ktLowercase(k);
+    k += '|';
+    k += parseVersionTagCpp(name, album);
+    return k;
+}
+
+// jobjectArray<String> → vector<string>（Modified UTF-8 字节；null 元素按 ""）
+void fillStringVec(JNIEnv* env, jobjectArray arr, std::vector<std::string>* out) {
+    const jsize n = env->GetArrayLength(arr);
+    out->clear();
+    out->reserve(static_cast<size_t>(n));
+    for (jsize k = 0; k < n; ++k) {
+        jstring js = static_cast<jstring>(env->GetObjectArrayElement(arr, k));
+        if (js == nullptr) { out->emplace_back(); continue; }
+        const char* raw = env->GetStringUTFChars(js, nullptr);
+        const jsize blen = env->GetStringUTFLength(js);
+        if (raw != nullptr) {
+            out->emplace_back(raw, static_cast<size_t>(blen));
+            env->ReleaseStringUTFChars(js, raw);
+        } else {
+            out->emplace_back();
+        }
+        env->DeleteLocalRef(js);
+    }
+}
+
+}  // namespace
+
 extern "C" {
 
 // ---------------------------------------------------------------------------
@@ -315,6 +654,93 @@ Java_com_HyperX_MI_Na_native_NativeBridge_nativeBmHash(
     }
     env->ReleasePrimitiveArrayCritical(jbytes, b, 0);
     return static_cast<jlong>(h);
+}
+
+// ---------------------------------------------------------------------------
+// nativeFilterSongs(names, artists, albums) -> 逐条 isLikelyMusic（true=保留）
+// 与 MainActivity.isLikelyMusic 逐字一致（词表 29 条 + 「第N章」状态机）。
+// ---------------------------------------------------------------------------
+JNIEXPORT jbooleanArray JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeFilterSongs(
+        JNIEnv* env, jobject /*thiz*/,
+        jobjectArray jnames, jobjectArray jartists, jobjectArray jalbums) {
+    if (jnames == nullptr || jartists == nullptr || jalbums == nullptr) return nullptr;
+    std::vector<std::string> names, artists, albums;
+    fillStringVec(env, jnames, &names);
+    fillStringVec(env, jartists, &artists);
+    fillStringVec(env, jalbums, &albums);
+    const jsize n = static_cast<jsize>(names.size());
+    if (static_cast<jsize>(artists.size()) != n || static_cast<jsize>(albums.size()) != n)
+        return nullptr;
+
+    jbooleanArray outArr = env->NewBooleanArray(n);
+    if (outArr == nullptr) return nullptr;
+    if (n > 0) {
+        std::vector<jboolean> flags(static_cast<size_t>(n));
+        for (jsize k = 0; k < n; ++k)
+            flags[static_cast<size_t>(k)] = isLikelyMusicCpp(names[static_cast<size_t>(k)],
+                                                             artists[static_cast<size_t>(k)],
+                                                             albums[static_cast<size_t>(k)])
+                                                 ? JNI_TRUE : JNI_FALSE;
+        env->SetBooleanArrayRegion(outArr, 0, n, flags.data());
+    }
+    return outArr;
+}
+
+// ---------------------------------------------------------------------------
+// nativeJunkFlags(names, artists, albums) -> 逐条 isJunkVersion（true=垃圾版本）
+// 与 MainActivity.isJunkVersion 逐字一致（parseVersionTag 定位 + 歌手拆词 +
+// 中文词表 23 条 + 拉丁缩写词级匹配）。供排序键批量预计算。
+// ---------------------------------------------------------------------------
+JNIEXPORT jbooleanArray JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeJunkFlags(
+        JNIEnv* env, jobject /*thiz*/,
+        jobjectArray jnames, jobjectArray jartists, jobjectArray jalbums) {
+    if (jnames == nullptr || jartists == nullptr || jalbums == nullptr) return nullptr;
+    std::vector<std::string> names, artists, albums;
+    fillStringVec(env, jnames, &names);
+    fillStringVec(env, jartists, &artists);
+    fillStringVec(env, jalbums, &albums);
+    const jsize n = static_cast<jsize>(names.size());
+    if (static_cast<jsize>(artists.size()) != n || static_cast<jsize>(albums.size()) != n)
+        return nullptr;
+
+    jbooleanArray outArr = env->NewBooleanArray(n);
+    if (outArr == nullptr) return nullptr;
+    if (n > 0) {
+        std::vector<jboolean> flags(static_cast<size_t>(n));
+        for (jsize k = 0; k < n; ++k)
+            flags[static_cast<size_t>(k)] = isJunkVersionCpp(names[static_cast<size_t>(k)],
+                                                             artists[static_cast<size_t>(k)],
+                                                             albums[static_cast<size_t>(k)])
+                                                 ? JNI_TRUE : JNI_FALSE;
+        env->SetBooleanArrayRegion(outArr, 0, n, flags.data());
+    }
+    return outArr;
+}
+
+// ---------------------------------------------------------------------------
+// nativeDedupKey(name, artist, album) -> 搜索结果去重键
+// = (name + "|" + artist).lowercase() + "|" + parseVersionTag(name, album)
+// 与 MainActivity 搜索合并处（两处调用点）逐字一致。
+// ---------------------------------------------------------------------------
+JNIEXPORT jstring JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeDedupKey(
+        JNIEnv* env, jobject /*thiz*/,
+        jstring jname, jstring jartist, jstring jalbum) {
+    auto getStr = [env](jstring js) -> std::string {
+        if (js == nullptr) return std::string();
+        const char* raw = env->GetStringUTFChars(js, nullptr);
+        const jsize blen = env->GetStringUTFLength(js);
+        std::string s;
+        if (raw != nullptr) {
+            s.assign(raw, static_cast<size_t>(blen));
+            env->ReleaseStringUTFChars(js, raw);
+        }
+        return s;
+    };
+    const std::string key = dedupKeyCpp(getStr(jname), getStr(jartist), getStr(jalbum));
+    return env->NewStringUTF(key.c_str());
 }
 
 }  // extern "C"

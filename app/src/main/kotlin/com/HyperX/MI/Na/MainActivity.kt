@@ -385,8 +385,11 @@ class MusicApiService {
                         // 去重键必须带版本标识：否则同一首歌的「原唱 / DJ版 / Live / 翻唱 / 伴奏」
                         // 会被合并成一条，先到的版本胜出（免 Cookie 源排在前面，DJ 版常常先到）
                         // →「搜不到原唱」「收藏的原唱点进去变成 DJ 版」。
-                        val key = (ps.name + "|" + ps.artist).lowercase() +
-                            "|" + (parseVersionTag(ps.name, ps.album) ?: "")
+                        // native 热点路径：key 计算下沉 libminova.so（与原表达式逐字一致）；
+                        // null = 不可用/失败 → 原表达式兜底，行为一致。
+                        val key = NativeBridge.dedupKey(ps.name, ps.artist, ps.album)
+                            ?: ((ps.name + "|" + ps.artist).lowercase() +
+                                "|" + (parseVersionTag(ps.name, ps.album) ?: ""))
                         if (!merged.containsKey(key)) {
                             merged[key] = Song(id = ps.id, name = ps.name, artist = ps.artist,
                                 album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
@@ -397,7 +400,9 @@ class MusicApiService {
             }
             // 按「抓取到达顺序」原样返回：展示层统一做整体倒序（用户要求默认倒序、不可调整）。
             // 这里不再做「原唱优先」重排 —— sortSearchResults / isJunkVersion 保留但已不参与展示。
-            merged.values.toList().filter { isLikelyMusic(it) }
+            // native 热点路径：批量过滤下沉 libminova.so（与 isLikelyMusic 逐字一致），
+            // 不可用时函数内部走原 Kotlin 逐条过滤，行为一致。
+            filterLikelyMusicList(merged.values.toList())
         }.getOrNull().orEmpty()
 
         // 全空时自动重试一次：上游偶发抽风（限流/超时）时第二次往往就正常。
@@ -479,8 +484,10 @@ class MusicApiService {
             jobs.forEach { (srcName, job) ->
                 job.await().forEach { ps ->
                     // 与 search() 同一套去重键（带版本标识），保证两个入口的口径一致
-                    val key = (ps.name + "|" + ps.artist).lowercase() +
-                        "|" + (parseVersionTag(ps.name, ps.album) ?: "")
+                    // native 热点路径：null = 不可用/失败 → 原表达式兜底。
+                    val key = NativeBridge.dedupKey(ps.name, ps.artist, ps.album)
+                        ?: ((ps.name + "|" + ps.artist).lowercase() +
+                            "|" + (parseVersionTag(ps.name, ps.album) ?: ""))
                     if (!merged.containsKey(key)) {
                         merged[key] = Song(id = ps.id, name = ps.name, artist = ps.artist,
                             album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
@@ -880,9 +887,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val next = currentSearchPage + 1
             // 15 秒超时兜底：无论上游多慢都会走到下面把「加载中」解锁，绝不卡住
+            // native 热点路径：批量过滤下沉 libminova.so（与 isLikelyMusic 逐字一致）。
             val raw = runCatching {
                 kotlinx.coroutines.withTimeoutOrNull(15_000) { apiService.searchPage(kw, next) }
-            }.getOrNull().orEmpty().filter { isLikelyMusic(it) }
+            }.getOrNull().orEmpty().let { filterLikelyMusicList(it) }
             // 搜索词拆 token：去掉空白与标点（中英文都要处理）
             val tokens = kw.lowercase()
                 .split(Regex("[\\s\\p{Punct}・、，。！？；：…—～「」『』（）()【】]+"))
@@ -4573,12 +4581,26 @@ fun MusicSearchTab(
                 "bilibili" to 5, "soda" to 6, "fivesing" to 7, "joox" to 8,
                 "jamendo" to 9, "qianqian" to 10
             )
-            val ordered = searchResults.sortedWith(
-                compareBy(
-                    { if (isJunkVersion(it)) 1 else 0 },
-                    { srcRank[it.source.lowercase()] ?: 11 }
+            // native 热点路径：垃圾版本标记批量下沉 libminova.so（与逐条 isJunkVersion 等价），
+            // 预计算后按同一组键稳定排序；null = 不可用/失败 → 原逐条路径，行为一致。
+            val junkFlags = junkFlagsFor(searchResults)
+            val ordered = if (junkFlags != null && junkFlags.size == searchResults.size) {
+                searchResults.mapIndexed { idx, s -> s to junkFlags[idx] }
+                    .sortedWith(
+                        compareBy(
+                            { if (it.second) 1 else 0 },
+                            { srcRank[it.first.source.lowercase()] ?: 11 }
+                        )
+                    )
+                    .map { it.first }
+            } else {
+                searchResults.sortedWith(
+                    compareBy(
+                        { if (isJunkVersion(it)) 1 else 0 },
+                        { srcRank[it.source.lowercase()] ?: 11 }
+                    )
                 )
-            )
+            }
             if (searchSortDesc) ordered.asReversed() else ordered
         }
 
@@ -8246,6 +8268,32 @@ fun isJunkVersion(song: Song): Boolean {
     return tokens.any { t -> junkCn.any { t.contains(it) } || junkWordRe.containsMatchIn(t) }
 }
 
+// ── native 热点路径（libminova.so）批量包装 ─────────────────────────────────
+// 批量过滤 / 批量垃圾版本标记：与上方 isLikelyMusic / isJunkVersion 逐字一致
+// （规则全部下沉 C++，搜索合并处对几十上百条结果一次性批量执行，避免逐条
+// 构建 hay + 每次调用都重编译 Regex 的开销）。
+// native 不可用或失败 → null / 回退原 Kotlin 逐条路径，行为一致。
+fun filterLikelyMusicList(songs: List<Song>): List<Song> {
+    if (songs.isEmpty()) return songs
+    val keeps = NativeBridge.filterSongs(
+        songs.map { it.name }.toTypedArray(),
+        songs.map { it.artist }.toTypedArray(),
+        songs.map { it.album }.toTypedArray()
+    )
+    return if (keeps != null && keeps.size == songs.size)
+        songs.filterIndexed { idx, _ -> keeps[idx] }
+    else
+        songs.filter { isLikelyMusic(it) }
+}
+
+fun junkFlagsFor(songs: List<Song>): BooleanArray? =
+    if (songs.isEmpty()) null
+    else NativeBridge.junkFlags(
+        songs.map { it.name }.toTypedArray(),
+        songs.map { it.artist }.toTypedArray(),
+        songs.map { it.album }.toTypedArray()
+    )
+
 fun sortSearchResults(list: List<Song>, mode: Int, keyword: String = ""): List<Song> {
     if (list.size <= 1) return list
     val srcRank = mapOf(
@@ -8268,24 +8316,52 @@ fun sortSearchResults(list: List<Song>, mode: Int, keyword: String = ""): List<S
         )
         3 -> list
         4 -> list.reversed()
-        else -> list.sortedWith(
-            compareBy(
-                // 1) 无版本修饰的更可能是原唱/正常版本
-                { if (!isJunkVersion(it)) 0 else 1 },
-                // 2) 搜索词点名的歌手优先
-                { artistHit(it) },
-                // 3) 时长已知的优先
-                { if (it.duration > 0) 0 else 1 },
-                // 4) 来源优先级（kuwo/咪咕/酷狗的华语原唱覆盖最好）
-                { srcRank[it.source.lowercase()] ?: 9 },
-                // 5) 热度降序
-                { -it.heat },
-                // 6) 歌名更短（越短越接近原版标题）
-                { it.name.length },
-                // 7) 最终兜底，保证排序完全确定
-                { it.id }
-            )
-        )
+        else -> {
+            // native 热点路径：垃圾版本标记批量下沉 libminova.so（与逐条 isJunkVersion 等价），
+            // 预计算后按同一组键稳定排序；null = 不可用/失败 → 原逐条路径，行为一致。
+            val junkFlags = junkFlagsFor(list)
+            if (junkFlags != null && junkFlags.size == list.size) {
+                list.mapIndexed { idx, s -> s to junkFlags[idx] }
+                    .sortedWith(
+                        compareBy(
+                            // 1) 无版本修饰的更可能是原唱/正常版本
+                            { if (!it.second) 0 else 1 },
+                            // 2) 搜索词点名的歌手优先
+                            { artistHit(it.first) },
+                            // 3) 时长已知的优先
+                            { if (it.first.duration > 0) 0 else 1 },
+                            // 4) 来源优先级（kuwo/咪咕/酷狗的华语原唱覆盖最好）
+                            { srcRank[it.first.source.lowercase()] ?: 9 },
+                            // 5) 热度降序
+                            { -it.first.heat },
+                            // 6) 歌名更短（越短越接近原版标题）
+                            { it.first.name.length },
+                            // 7) 最终兜底，保证排序完全确定
+                            { it.first.id }
+                        )
+                    )
+                    .map { it.first }
+            } else {
+                list.sortedWith(
+                    compareBy(
+                        // 1) 无版本修饰的更可能是原唱/正常版本
+                        { if (!isJunkVersion(it)) 0 else 1 },
+                        // 2) 搜索词点名的歌手优先
+                        { artistHit(it) },
+                        // 3) 时长已知的优先
+                        { if (it.duration > 0) 0 else 1 },
+                        // 4) 来源优先级（kuwo/咪咕/酷狗的华语原唱覆盖最好）
+                        { srcRank[it.source.lowercase()] ?: 9 },
+                        // 5) 热度降序
+                        { -it.heat },
+                        // 6) 歌名更短（越短越接近原版标题）
+                        { it.name.length },
+                        // 7) 最终兜底，保证排序完全确定
+                        { it.id }
+                    )
+                )
+            }
+        }
     }
 }
 
