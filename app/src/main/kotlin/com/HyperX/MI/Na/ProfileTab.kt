@@ -9,7 +9,7 @@ import androidx.compose.animation.shrinkVertically
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
-import android.widget.Toast
+
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -1457,7 +1457,7 @@ fun openQQ(context: android.content.Context, qq: String) {
     try {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("mqqapi://card/show_pslcard?src_type=internal&version=1&uin=$qq")))
     } catch (e: Exception) {
-        try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://qm.qq.com/cgi-bin/qm/qr?k=$qq"))) } catch (_: Exception) { Toast.makeText(context, "无法打开QQ", Toast.LENGTH_SHORT).show() }
+        try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://qm.qq.com/cgi-bin/qm/qr?k=$qq"))) } catch (_: Exception) { AppToast.show("无法打开QQ") }
     }
 }
 
@@ -1516,7 +1516,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
     fun startConvert(files: List<File>) {
         val existing = files.filter { it.exists() }
         if (existing.isEmpty()) {
-            Toast.makeText(context, "本地文件不存在", Toast.LENGTH_SHORT).show()
+            AppToast.show("本地文件不存在")
             return
         }
         convertSources = existing
@@ -1560,7 +1560,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                         dirTick++
                         exitSelection()
                         showClearAllDialog = false
-                        Toast.makeText(context, "已删除全部文件", Toast.LENGTH_SHORT).show()
+                        AppToast.show("已删除全部文件")
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(14.dp),
@@ -1600,7 +1600,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                         dirTick++
                         exitSelection()
                         showBatchDeleteDialog = false
-                        Toast.makeText(context, "已删除 $batchCount 首歌曲", Toast.LENGTH_SHORT).show()
+                        AppToast.show("已删除 $batchCount 首歌曲")
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(14.dp),
@@ -1633,7 +1633,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                 onBitrateSelect = { selectedBitrate = it },
                 onStart = { format ->
                     AudioConversionManager.convert(convertSources, format, selectedBitrate, AudioFormats.SAMPLE_RATES.first())
-                    Toast.makeText(context, "开始转换 ${convertSources.size} 个文件", Toast.LENGTH_SHORT).show()
+                    AppToast.show("开始转换 ${convertSources.size} 个文件")
                 },
                 onCancel = { AudioConversionManager.cancel() },
                 onShare = { shareAudioFiles(context, listOf(it)) }
@@ -1698,7 +1698,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                     onConvert = {
                         val files = downloadedSongs.filter { it.id in selectedIds }.map { songFile(it) }.filter { it.exists() }
                         if (files.isNotEmpty()) startConvert(files)
-                        else Toast.makeText(context, "所选歌曲没有本地文件", Toast.LENGTH_SHORT).show()
+                        else AppToast.show("所选歌曲没有本地文件")
                     },
                     onShare = {
                         val files = downloadedSongs.filter { it.id in selectedIds }.map { songFile(it) }.filter { it.exists() }
@@ -1774,7 +1774,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                             viewModel.deleteDownloadedSong(song.id)
                             AudioConversionManager.refresh()
                             dirTick++
-                            Toast.makeText(context, "已删除「${song.name}」", Toast.LENGTH_SHORT).show()
+                            AppToast.show("已删除「${song.name}」")
                         },
                         modifier = Modifier.animateItem()
                     )
@@ -1810,7 +1810,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                             onClick = {
                                 val n = AudioConversionManager.clearAll()
                                 dirTick++
-                                Toast.makeText(context, "已清空 $n 个转换文件", Toast.LENGTH_SHORT).show()
+                                AppToast.show("已清空 $n 个转换文件")
                             },
                             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
                         ) { Text("清空", fontSize = 13.sp) }
@@ -1824,7 +1824,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                         onDelete = {
                             AudioConversionManager.delete(file)
                             dirTick++
-                            Toast.makeText(context, "已删除「${file.name}」", Toast.LENGTH_SHORT).show()
+                            AppToast.show("已删除「${file.name}」")
                         },
                         modifier = Modifier.animateItem()
                     )
@@ -2005,7 +2005,13 @@ private fun DownloadedSongRow(
             if (song.picUrl.isNotBlank()) {
                 AsyncImage(model = song.picUrl, contentDescription = "封面", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
-                Icon(Icons.Rounded.MusicNote, null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f), modifier = Modifier.size(24.dp))
+                // 无封面兜底：统一封面占位图铺满（原为 MusicNote 图标）
+                Image(
+                    painter = painterResource(R.drawable.fallback_cover),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
         }
         Spacer(Modifier.width(12.dp))
@@ -2436,7 +2442,7 @@ private fun ConversionResultRow(result: ConversionResult, onShare: (File) -> Uni
 private fun shareAudioFiles(context: android.content.Context, files: List<File>) {
     val existing = files.filter { it.exists() }
     if (existing.isEmpty()) {
-        Toast.makeText(context, "文件不存在", Toast.LENGTH_SHORT).show()
+        AppToast.show("文件不存在")
         return
     }
     try {
@@ -2457,7 +2463,7 @@ private fun shareAudioFiles(context: android.content.Context, files: List<File>)
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         context.startActivity(Intent.createChooser(intent, "分享音频文件"))
     } catch (_: Exception) {
-        Toast.makeText(context, "未找到可分享的应用", Toast.LENGTH_SHORT).show()
+        AppToast.show("未找到可分享的应用")
     }
 }
 
@@ -2674,7 +2680,7 @@ fun FeedbackScreen(
             Button(
                 onClick = {
                     if (!canSubmit) {
-                        Toast.makeText(context, "请至少输入 5 个字的反馈内容", Toast.LENGTH_SHORT).show()
+                        AppToast.show("请至少输入 5 个字的反馈内容")
                         return@Button
                     }
                     submitting = true
@@ -2713,9 +2719,9 @@ fun FeedbackScreen(
                             submitted = true
                             content = ""
                             contact = ""
-                            Toast.makeText(context, "反馈已提交，感谢你的建议", Toast.LENGTH_LONG).show()
+                            AppToast.show("反馈已提交，感谢你的建议", long = true)
                         } else {
-                            Toast.makeText(context, "提交失败：$errMsg", Toast.LENGTH_LONG).show()
+                            AppToast.show("提交失败：$errMsg", long = true)
                         }
                     }
                 },

@@ -1,7 +1,9 @@
 package com.HyperX.MI.Na
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -381,11 +383,26 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
             val rest = ranked.filter { it.id !in dailyIds }
             val restThenAll = (rest + ranked).distinctBy { it.id }
 
-            forYou = diversify((rest + listened + seeded).distinctBy { it.id }, 160)
-            similar = diversify((seeded + restThenAll).distinctBy { it.id }, 160)
-            repeated = diversify((listened + recentFavorites + restThenAll).distinctBy { it.id }, 160)
-            everyone = diversify(restThenAll.shuffled(rnd), 160)
-            interest = diversify((rest + ranked.reversed()).distinctBy { it.id }, 160)
+            // 跨分区去重：按顺序构建，每个分区排除前面分区已用掉的歌（此前后两列大量重复）
+            val sectionUsed = HashSet<String>().apply {
+                addAll(dailyList.map { it.id })
+            }
+            // 关键：每个分区**按上限取用**，且只把「真正取走」的 id 记入 sectionUsed。
+            // 之前扫描时就标记整个池子为已用 → 第一个分区吃掉全部，后面四个分区全空
+            // （界面表现即「只有两个大卡片，下面一片空白」）。
+            fun takeFresh(src: List<Song>, limit: Int): List<Song> {
+                val out = ArrayList<Song>(limit)
+                for (s in src) {
+                    if (out.size >= limit) break
+                    if (sectionUsed.add(s.id)) out.add(s)
+                }
+                return out
+            }
+            forYou = diversify(takeFresh(rest + listened + seeded, 40), 40)
+            similar = diversify(takeFresh(seeded + restThenAll, 40), 40)
+            repeated = diversify(takeFresh(listened + recentFavorites + restThenAll, 40), 40)
+            everyone = diversify(takeFresh(restThenAll.shuffled(rnd), 40), 40)
+            interest = diversify(takeFresh(rest + ranked.reversed(), 40), 40)
         }
 
         // 先用上次成功的结果垫底：进入时不会白屏，网络抽风也还有内容
@@ -411,7 +428,12 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                 keywords.chunked(3).forEach { batch ->
                     val jobs = batch.map { kw ->
                         async(Dispatchers.IO) {
-                            val res = runCatching { api.search(kw).getOrNull().orEmpty() }.getOrNull().orEmpty()
+                            // 推荐池必须用免费源：之前误用网易云专属搜索，
+                            // 池子全是热门 VIP 歌，四列重复且全部没有免费音源。
+                            val res: List<Song> = kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                                api.search(kw, listOf("kuwo", "migu", "qianqian", "qq", "bilibili"))
+                                    .getOrDefault(emptyList())
+                            } ?: emptyList()
                             // 记录「这批歌是口味关键词搜出来的」，打分时直接加权
                             if (tasteKeywordSet.contains(kw.trim().lowercase())) {
                                 res.forEach { s -> tasteHitKeys.add(songKey(s)) }
@@ -718,6 +740,13 @@ private fun CardDetailPage(
                             .clip(RoundedCornerShape(28.dp))
                     ) {
                         val heroCover = songs.firstOrNull()?.picUrl.orEmpty()
+                        // 无封面兜底：统一封面占位图铺满（上方有黑色遮罩压字）
+                        Image(
+                            painter = painterResource(R.drawable.fallback_cover),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
                         if (heroCover.isNotBlank()) {
                             AsyncImage(
                                 model = heroCover,
@@ -786,12 +815,26 @@ private fun CardDetailPage(
                             )
                         }
                         Spacer(Modifier.width(12.dp))
-                        AsyncImage(
-                            model = song.picUrl,
-                            contentDescription = null,
-                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)),
-                            contentScale = ContentScale.Crop
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            // 无封面兜底：统一封面占位图
+                            Image(
+                                painter = painterResource(R.drawable.fallback_cover),
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                            AsyncImage(
+                                model = song.picUrl,
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
                         Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -1095,16 +1138,13 @@ private fun SongGridCell(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(RoundedCornerShape(9.dp))
-                    .background(
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)
-                    ),
-                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    song.name.trim().take(1).ifBlank { "\u266A" },
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                // 无封面兜底：统一封面占位图铺满（原为渐变底 + 首字）
+                Image(
+                    painter = painterResource(R.drawable.fallback_cover),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
                 )
                 if (song.picUrl.isNotBlank()) {
                     AsyncImage(
@@ -1214,7 +1254,7 @@ private fun SongRow(
 }
 
 /**
- * 封面方块：无图 / 加载失败时兜底为渐变 + 首字。
+ * 封面方块：无图 / 加载失败时兜底为统一的封面占位图（fallback_cover）。
  * 兜底层始终绘制在图片下方，图片加载失败（Coil 不绘制）时自然露出，零额外依赖。
  */
 @Composable
@@ -1222,17 +1262,14 @@ private fun CoverBox(url: String, name: String, size: Dp, corner: Dp = 12.dp) {
     Box(
         modifier = Modifier
             .size(size)
-            .clip(RoundedCornerShape(corner))
-            .background(
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)
-            ),
+            .clip(RoundedCornerShape(corner)),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            name.trim().take(1).ifBlank { "♪" },
-            fontSize = (size.value * 0.34f).sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+        Image(
+            painter = painterResource(R.drawable.fallback_cover),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
         )
         if (url.isNotBlank()) {
             AsyncImage(

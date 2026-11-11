@@ -2,6 +2,8 @@ package com.HyperX.MI.Na
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
+import android.animation.ObjectAnimator
+import android.animation.AnimatorSet
 import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
@@ -26,11 +28,13 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.google.android.material.card.MaterialCardView
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -120,8 +124,8 @@ object FloatingLyricsPrefs {
     fun showPrevNext(ctx: Context) = sp(ctx).getBoolean("show_prev_next", true)
     fun setShowPrevNext(ctx: Context, v: Boolean) { sp(ctx).edit().putBoolean("show_prev_next", v).apply() }
 
-    /** 行间距（额外 dp，0..12） */
-    fun lineSpacing(ctx: Context) = sp(ctx).getInt("line_spacing", 2)
+    /** 行间距（额外 dp，0..12）。默认 4dp 与旧版写死的 setPadding(0, 4dp, 0, 4dp) 一致 */
+    fun lineSpacing(ctx: Context) = sp(ctx).getInt("line_spacing", 4)
     fun setLineSpacing(ctx: Context, v: Int) { sp(ctx).edit().putInt("line_spacing", v.coerceIn(0, 12)).apply() }
 
     /** 对齐：0 左 / 1 居中 / 2 右 */
@@ -133,6 +137,16 @@ object FloatingLyricsPrefs {
     fun setBgAlphaPercent(ctx: Context, v: Int) { sp(ctx).edit().putInt("bg_alpha_pct", v.coerceIn(0, 100)).apply() }
 
     /** 卡片圆角 dp 0..32 */
+    fun windowWidthDp(ctx: Context) = sp(ctx).getInt("win_w_dp", 280)
+    fun setWindowWidthDp(ctx: Context, v: Int) { sp(ctx).edit().putInt("win_w_dp", v.coerceIn(280, 400)).apply() }
+    fun windowHeightDp(ctx: Context) = sp(ctx).getInt("win_h_dp", 150)
+    fun setWindowHeightDp(ctx: Context, v: Int) { sp(ctx).edit().putInt("win_h_dp", v.coerceIn(120, 200)).apply() }
+    fun lyricColorIndex(ctx: Context) = sp(ctx).getInt("color_index", 1)
+    fun setLyricColorIndex(ctx: Context, v: Int) { sp(ctx).edit().putInt("color_index", v).apply() }
+    fun lyricBgIndex(ctx: Context) = sp(ctx).getInt("bg_index", 0)
+    fun setLyricBgIndex(ctx: Context, v: Int) { sp(ctx).edit().putInt("bg_index", v).apply() }
+    fun showBorder(ctx: Context) = sp(ctx).getBoolean("show_border", false)
+    fun setShowBorder(ctx: Context, v: Boolean) { sp(ctx).edit().putBoolean("show_border", v).apply() }
     fun cornerRadiusDp(ctx: Context) = sp(ctx).getInt("corner_dp", 19)
     fun setCornerRadiusDp(ctx: Context, v: Int) { sp(ctx).edit().putInt("corner_dp", v.coerceIn(0, 32)).apply() }
 
@@ -140,8 +154,8 @@ object FloatingLyricsPrefs {
     fun cardWidthPercent(ctx: Context) = sp(ctx).getInt("card_width_pct", 100)
     fun setCardWidthPercent(ctx: Context, v: Int) { sp(ctx).edit().putInt("card_width_pct", v.coerceIn(60, 100)).apply() }
 
-    /** 阴影强度 0..100 */
-    fun shadowAlphaPercent(ctx: Context) = sp(ctx).getInt("shadow_pct", 30)
+    /** 阴影强度 0..100（100 = 预设阴影原强度，与旧版硬编码一致；按百分比缩放阴影色 alpha） */
+    fun shadowAlphaPercent(ctx: Context) = sp(ctx).getInt("shadow_pct", 100)
     fun setShadowAlphaPercent(ctx: Context, v: Int) { sp(ctx).edit().putInt("shadow_pct", v.coerceIn(0, 100)).apply() }
 
     /** 左右内边距 dp 8..40 */
@@ -259,6 +273,7 @@ class FloatingLyricsService : Service() {
     private var watchJob: Job? = null
 
     private var lyricView: LinearLayout? = null
+    private var lyricTextViews: List<TextView> = emptyList()
     private var prevText: TextView? = null
     private var mainText: TextView? = null
     private var nextText: TextView? = null
@@ -270,7 +285,7 @@ class FloatingLyricsService : Service() {
     private var panelHost: FrameLayout? = null
 
     /** 驱动「四行歌词同步切换」的唯一 animator（避免四行各自动画导致错位）。 */
-    private var lineAnimator: ValueAnimator? = null
+    private var lineAnimator: android.animation.Animator? = null
 
     /** 面板内容预量高度（px）：窗口高度按真实内容收放，底部控件不会被裁掉。 */
     private var panelContentHeight = 0
@@ -419,56 +434,70 @@ class FloatingLyricsService : Service() {
      * 前 40%（200ms，加速）旧句上滑淡出；后 60%（300ms，减速）新句自下方滑入；
      * 文案替换正好发生在两段的交界帧，四行在同一次回调里一起换字。
      */
-    private fun applyLinesSmooth(items: List<Pair<TextView?, String>>) {
-        val changed = items.mapNotNull { (tv, text) ->
-            if (tv != null && tv.text?.toString() != text) tv to text else null
-        }
-        if (changed.isEmpty()) return
+    private fun applyLinesSmooth(items: List<Pair<TextView?, CharSequence>>) {
+        // 照搬用户早期 Lua 项目的三行编排（main.lua updateLyricsWithAnimation）：
+        //   第 1 行（上一句）：静止，alpha 0.7
+        //   第 2 行（当前句）：自下方 30dp 滑入 + 缩放 0.8→1，400ms Overshoot(1.2) 回弹
+        //   第 3 行（下一句）：自下方 15dp 轻滑入，350ms 减速，落定 alpha 0.7
+        // 先统一换文案，再按行做各自的入场动画。
+        // 变更检测（Lua 版原有、移植时被删掉）：refreshLyricText 在轮询/样式自愈里
+        // 也会被调用（行未变化时同样走到这里），没有这个判断就会反复重播滑入动画
+        // → 歌词持续抖动。文案没变就什么都不做。
+        val changed = items.any { (tv, text) -> tv != null && tv.text?.toString() != text.toString() }
+        if (!changed) return
+        items.forEach { (tv, text) -> tv?.text = text }
+        val main = mainText ?: return
+        val prev = prevText
+        val next = nextText
+
         lineAnimator?.cancel()
-        val views = changed.map { it.first }
-        // 清掉这些 view 上可能残留的单行动画，避免两套动画叠加出现错位
-        views.forEach { it.animate().cancel() }
+        val anims = ArrayList<android.animation.Animator>()
 
-        // 四行统一位移量：按主行字号算，保证四行滑动距离一致（视觉最齐）
-        val dy = ((mainText?.textSize ?: dp(16).toFloat()) * 0.85f).coerceAtLeast(dp(6).toFloat())
-        val swapAt = 0.4f
-        val accel = AccelerateInterpolator()
-        val decel = DecelerateInterpolator()
-        var swapped = false
-        fun swapText() {
-            if (swapped) return
-            swapped = true
-            changed.forEach { (tv, text) -> tv.text = text }
+        // 上一行：静止淡色
+        prev?.alpha = 0.7f
+        prev?.translationY = 0f
+        prev?.scaleX = 1f
+        prev?.scaleY = 1f
+
+        // 当前行：滑入 + 回弹 + 缩放
+        val dyIn = dp(30).toFloat()
+        main.alpha = 0f
+        main.translationY = dyIn
+        main.scaleX = 0.8f
+        main.scaleY = 0.8f
+        val mainSet = android.animation.AnimatorSet()
+        mainSet.playTogether(listOf(
+            ObjectAnimator.ofFloat(main, View.ALPHA, 0f, 1f),
+            ObjectAnimator.ofFloat(main, View.TRANSLATION_Y, dyIn, 0f),
+            ObjectAnimator.ofFloat(main, View.SCALE_X, 0.8f, 1f),
+            ObjectAnimator.ofFloat(main, View.SCALE_Y, 0.8f, 1f)
+        ))
+        mainSet.duration = 400
+        mainSet.interpolator = OvershootInterpolator(1.2f)
+        anims.add(mainSet)
+
+        // 下一行：轻滑入
+        if (next != null && next.visibility == View.VISIBLE) {
+            val dyN = dp(15).toFloat()
+            next.alpha = 0f
+            next.translationY = dyN
+            val nextSet = android.animation.AnimatorSet()
+            nextSet.playTogether(listOf(
+                ObjectAnimator.ofFloat(next, View.ALPHA, 0f, 0.7f),
+                ObjectAnimator.ofFloat(next, View.TRANSLATION_Y, dyN, 0f)
+            ))
+            nextSet.duration = 350
+            nextSet.interpolator = DecelerateInterpolator()
+            anims.add(nextSet)
         }
 
-        lineAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 500
-            interpolator = android.view.animation.LinearInterpolator()
-            addUpdateListener { a ->
-                val p = a.animatedFraction
-                if (p < swapAt) {
-                    val e = accel.getInterpolation(p / swapAt)
-                    views.forEach { v ->
-                        v.alpha = 1f - e
-                        v.translationY = -dy * e
-                    }
-                } else {
-                    swapText()
-                    val e = decel.getInterpolation((p - swapAt) / (1f - swapAt))
-                    views.forEach { v ->
-                        v.alpha = e
-                        v.translationY = dy * (1f - e)
-                    }
-                }
-            }
+        lineAnimator = android.animation.AnimatorSet().apply {
+            playTogether(anims)
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
-                    swapText()
-                    views.forEach { v ->
-                        v.alpha = 1f
-                        v.translationY = 0f
-                    }
                     if (lineAnimator === animation) lineAnimator = null
+                    next?.alpha = 0.7f
+                    next?.translationY = 0f
                 }
             })
             start()
@@ -489,7 +518,32 @@ class FloatingLyricsService : Service() {
 
     /* ================= 卡片背景（只有 不透明 / 透明 两态） ================= */
 
-    private fun buildCardDrawable(): GradientDrawable =
+    /** 照搬 main.lua 的歌词颜色预设（主行色 / 其他行半透明同色 / 阴影色） */
+    private data class LyricColorSet(val name: String, val currentColor: Int, val otherColor: Int, val shadowColor: Int)
+    private val lyricColorSets = listOf(
+        LyricColorSet("粉色", 0xFFFF69B4.toInt(), 0x99FF69B4.toInt(), 0xFF8B008B.toInt()),
+        LyricColorSet("蓝色", 0xFF1E90FF.toInt(), 0x991E90FF.toInt(), 0xFF00008B.toInt())
+    )
+
+    /** 照搬 main.lua 的背景颜色预设（含各自的边框色） */
+    private data class LyricBgSet(val name: String, val color: Int, val borderColor: Int)
+    private val lyricBgSets = listOf(
+        LyricBgSet("深色", 0xCC1A1A1A.toInt(), 0x55FFFFFF.toInt()),
+        LyricBgSet("白色", 0xCCFFFFFF.toInt(), 0x55000000.toInt()),
+        LyricBgSet("雫蓝", 0xDDF5F9FF.toInt(), 0xDDB3D9FF.toInt()),
+        LyricBgSet("芙兰", 0xDDF0F4F9.toInt(), 0xDDD1D5F2.toInt()),
+        LyricBgSet("绒灰蓝", 0xDDF5F9FC.toInt(), 0xDD9DB5D6.toInt()),
+        LyricBgSet("薰衣草紫", 0xDDFAF7FC.toInt(), 0xDDC3A6D2.toInt()),
+        LyricBgSet("透明", 0x33000000.toInt(), 0x33FFFFFF.toInt())
+    )
+
+    private fun currentLyricColorSet(): LyricColorSet =
+        lyricColorSets[FloatingLyricsPrefs.lyricColorIndex(this).coerceIn(0, lyricColorSets.size - 1)]
+
+    private fun currentLyricBgSet(): LyricBgSet =
+        lyricBgSets[FloatingLyricsPrefs.lyricBgIndex(this).coerceIn(0, lyricBgSets.size - 1)]
+
+        private fun buildCardDrawable(): GradientDrawable =
         GradientDrawable().apply {
             cornerRadius = dp(8).toFloat()  // 标准矩形，小圆角
             setColor(Color.WHITE)  // 默认不透明白色
@@ -497,38 +551,43 @@ class FloatingLyricsService : Service() {
 
     /** 当前行的实际文字色（跟随动态色时为强调色，否则为用户选色）。 */
     private fun effectiveMainColor(): Int =
-        if (FloatingLyricsPrefs.useAccentForCurrent(this)) FloatingLyricsPrefs.accentColor(this)
-        else FloatingLyricsPrefs.textColor(this)
+        // 尊重用户在面板里选的文字颜色：不再被强调色覆盖（那就是「设置失效」的来源）。
+        FloatingLyricsPrefs.textColor(this)
 
     private fun applyCardBackground() {
         val d = bgDrawable ?: return
-        val bg = FloatingLyricsPrefs.bgColor(this)
-        val opaque = FloatingLyricsPrefs.isOpaque(this)
-
-        // 圆角矩形（长方体）：统一纯色实底 —— 不用任何渐变，也不加阴影。
-        // 播放中 / 暂停态外观完全一致，切换时不跳变。
+        // 照搬 main.lua：背景 = 预设色（自带透明度）× 面板透明度百分比，12dp 圆角，1dp 边框可开关。
+        // 自定义背景（lyricBgIndex == -1）不走预设：用用户选的 bgColor 的 RGB，
+        // 透明度按现有逻辑（不透明白底）；之前索引 -1 被 clamp 成 0 → 永远显示预设色。
+        val bi = FloatingLyricsPrefs.lyricBgIndex(this)
+        val customBg = bi == -1
+        val set = currentLyricBgSet()     // 预设分支的色源；自定义时仅沿用其边框色
+        val alphaPct = FloatingLyricsPrefs.bgAlphaPercent(this)
+        val base = if (customBg) FloatingLyricsPrefs.bgColor(this) else set.color
+        // 背景 alpha = 「不透明」开关 × 不透明度百分比：
+        //   开关开 → 255 × pct%（默认 100% → 255，与旧版视觉一致）
+        //   开关关 → 0（完全透明，只留带阴影的文字 —— 设置页「背景不透明」开关说明文案即此语义）
+        // 旧版这里硬编码 255，把「背景不透明」开关彻底锁死（真机反馈的根因）。
+        val a = if (FloatingLyricsPrefs.isOpaque(this)) 255 * alphaPct.coerceIn(0, 100) / 100 else 0
+        val rgb = base and 0xFFFFFF
         val corner = dp(FloatingLyricsPrefs.cornerRadiusDp(this)).toFloat()
         if (d.cornerRadius != corner) d.cornerRadius = corner
-        val alphaPct = FloatingLyricsPrefs.bgAlphaPercent(this)
-        fun scaled(a: Int) = (a * alphaPct / 100).coerceIn(0, 255)
         if (root?.elevation != 0f) root?.elevation = 0f
         if (root?.translationZ != 0f) root?.translationZ = 0f
-
-        // 可读性兜底：底色按文字色亮度自动调深/调亮，任何配色都能看清。
-        // （选白字 + 白底以前是对比度 1:1 完全看不见）
-        adaptedBg = LyricContrast.readableBg(effectiveMainColor(), bg, 4.5)
+        adaptedBg = withAlpha(rgb or (a shl 24), a)
 
         when {
             showingPanel -> {
-                // 面板内部控件按「深色表面 + 白色文字/图标」设计，底色必须与白字形成对比，
-                // 否则默认白底时面板会整片看不见。
-                val panelBg = LyricContrast.readableBg(Color.WHITE, bg, 4.5)
-                d.setColor(withAlpha(panelBg, scaled(246).coerceAtLeast(200)))
-                d.setStroke(dp(1), Color.argb(48, 255, 255, 255))
+                // 面板自身永远是固定深色 MD3 surface：绝不跟随歌词卡片底色。
+                // 否则用户把歌词底色设成白色后，面板里的白色文字会被底色吃掉、完全看不见
+                // （用户实测反馈的问题）。
+                d.setColor(0xF21B1B1F.toInt())
+                d.setStroke(dp(1), Color.argb(38, 255, 255, 255))
             }
-            opaque && alphaPct > 0 -> {
-                d.setColor(withAlpha(adaptedBg, scaled(255)))
-                d.setStroke(dp(1), Color.argb(40, 255, 255, 255))
+            a > 0 -> {
+                d.setColor(rgb or (a shl 24))
+                if (FloatingLyricsPrefs.showBorder(this)) d.setStroke(dp(1), set.borderColor)
+                else d.setStroke(0, Color.TRANSPARENT)
             }
             else -> {
                 d.setColor(Color.TRANSPARENT)
@@ -537,56 +596,66 @@ class FloatingLyricsService : Service() {
         }
         root?.background = d
     }
-    /* ================= 视图构建 ================= */
+        /* ================= 视图构建 ================= */
+
+    /** 窗口宽度：照搬 main.lua（默认 280dp，可调 280-400），再乘「卡片宽度」百分比（默认 100% 不变）。 */
+    private fun cardFixedWidthPx(): Int =
+        dp(FloatingLyricsPrefs.windowWidthDp(this)) *
+            FloatingLyricsPrefs.cardWidthPercent(this).coerceIn(60, 100) / 100
+
+    /** 单行高度（随字号） */
+    private fun lyricRowHeightPx(): Int {
+        val fs = FloatingLyricsPrefs.fontSize(this).toFloat()
+        return (fs * resources.displayMetrics.scaledDensity * 1.55f).toInt().coerceAtLeast(dp(22))
+    }
+
+    /** 窗口高度：照搬 main.lua（默认 150dp，可调 120-200） */
+    private fun cardFixedHeightPx(): Int = dp(FloatingLyricsPrefs.windowHeightDp(this))
 
     private fun buildLyricView(): LinearLayout {
+        val cs = currentLyricColorSet()
+        // 初始值与 restyleInPlace 读同一批偏好，构建后立即被 restyleInPlace 覆盖为最新值
+        val padH = dp(FloatingLyricsPrefs.paddingHDp(this))
+        val gap = dp(FloatingLyricsPrefs.lineSpacing(this).coerceIn(0, 12))
         val l = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(26), dp(16), dp(26), dp(16))
+            gravity = Gravity.CENTER
+            setPadding(padH, dp(12), padH, dp(12))
             isClickable = true
             isFocusable = true
         }
 
-        fun lineView(isMain: Boolean): TextView = TextView(this).apply {
-            if (isMain) maxLines = 2 else maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-            setLineSpacing(0f, 1.08f)
-            isClickable = false
-            isFocusable = false
-            if (isMain) setTypeface(Typeface.create(typeface, Typeface.BOLD))
+        // 照搬 main.lua：三个单行 TextView，上下行间距按「行间距」偏好（0..12dp），minHeight 24dp；
+        // 第 2 行字号 +2、粗体、当前色 + 4dp 阴影；第 1/3 行普通、半透明同色 + 3dp 阴影。
+        lyricTextViews = (1..3).map { idx ->
+            TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                gravity = Gravity.CENTER
+                setPadding(0, gap, 0, gap)   // 行间距跟偏好走（restyleInPlace 同步更新），旧版写死 4dp
+                setSingleLine(true)
+                ellipsize = TextUtils.TruncateAt.END
+                minHeight = dp(24)
+                isClickable = false
+                isFocusable = false
+                if (idx == 2) {
+                    textSize = FloatingLyricsPrefs.fontSize(this@FloatingLyricsService) + 2f
+                    setTypeface(Typeface.DEFAULT_BOLD)
+                    setTextColor(cs.currentColor)
+                    setShadowLayer(dp(4).toFloat(), 0f, 0f, cs.shadowColor)
+                } else {
+                    textSize = FloatingLyricsPrefs.fontSize(this@FloatingLyricsService).toFloat()
+                    setTextColor(cs.otherColor)
+                    setShadowLayer(dp(3).toFloat(), 0f, 0f, cs.shadowColor)
+                }
+            }
         }
-
-        val prev = lineView(false).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(5) }
-        }
-        val main = lineView(true).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        }
-        val trans = lineView(false).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(3) }
-        }
-        val next = lineView(false).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(5) }
-        }
-        l.addView(prev)
-        l.addView(main)
-        l.addView(trans)
-        l.addView(next)
-        prevText = prev
-        mainText = main
-        transText = trans
-        nextText = next
+        prevText = lyricTextViews[0]
+        mainText = lyricTextViews[1]
+        nextText = lyricTextViews[2]
+        transText = null
+        lyricTextViews.forEach { l.addView(it) }
         return l
     }
 
@@ -619,7 +688,10 @@ class FloatingLyricsService : Service() {
                 setTypeface(typeface, if (active) Typeface.BOLD else Typeface.NORMAL)
             })
             isClickable = true
-            setOnClickListener { onClick() }
+            setOnClickListener {
+                android.util.Log.e("FL-Panel", "onClick: chip \"$label\"")
+                runCatching { onClick() }.onFailure { android.util.Log.e("FL-Panel", "onClick chip $label FAILED", it) }
+            }
         }
     }
 
@@ -652,7 +724,10 @@ class FloatingLyricsService : Service() {
             setPadding(dp(9), dp(9), dp(9), dp(9))
             layoutParams = LinearLayout.LayoutParams(dp(38), dp(38))
             isClickable = true
-            setOnClickListener { onClick() }
+            setOnClickListener {
+                android.util.Log.e("FL-Panel", "onClick: step " + if (iconRes == R.drawable.ic_fl_add) "+" else "-")
+                runCatching { onClick() }.onFailure { android.util.Log.e("FL-Panel", "onClick step FAILED", it) }
+            }
         }
     }
 
@@ -679,14 +754,19 @@ class FloatingLyricsService : Service() {
             background = d
             layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(11) }
             isClickable = true
-            setOnClickListener { onClick() }
+            setOnClickListener {
+                // 排查「点了没反应」：确认进入 onClick；异常打日志而不是无声无息
+                android.util.Log.e("FL-Panel", "onClick: colorDot selected=$selected")
+                runCatching { onClick() }.onFailure { android.util.Log.e("FL-Panel", "onClick colorDot FAILED", it) }
+            }
         }
     }
 
-    /** 两态分段控件：不透明 | 透明。 */
+    /** 两态分段控件：不透明 | 透明。可传 icons 为每段配 16dp 矢量图标（图标 + 文字居中排列）。 */
     private fun segmentedTwoState(
         labels: List<String>,
         selectedIndex: Int,
+        icons: List<Int>? = null,
         onSelect: (Int) -> Unit
     ): LinearLayout {
         val accent = FloatingLyricsPrefs.accentColor(this)
@@ -712,6 +792,14 @@ class FloatingLyricsService : Service() {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                     if (i > 0) marginStart = dp(4)
                 }
+                // 16dp 语义图标：颜色跟随选中/未选中态（与文字同色）
+                if (icons != null && i < icons.size) {
+                    addView(ImageView(this@FloatingLyricsService).apply {
+                        setImageResource(icons[i])
+                        setColorFilter(if (selected) readableOn(accent) else Color.WHITE)
+                        layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(5) }
+                    })
+                }
                 addView(TextView(this@FloatingLyricsService).apply {
                     text = label
                     textSize = 13f
@@ -720,7 +808,10 @@ class FloatingLyricsService : Service() {
                     gravity = Gravity.CENTER
                 })
                 isClickable = true
-                setOnClickListener { onSelect(i) }
+                setOnClickListener {
+                    android.util.Log.e("FL-Panel", "onClick: segment[$i] $label")
+                    runCatching { onSelect(i) }.onFailure { android.util.Log.e("FL-Panel", "onClick segment[$i] FAILED", it) }
+                }
             })
         }
         return row
@@ -791,6 +882,7 @@ class FloatingLyricsService : Service() {
                 this@FloatingLyricsService,
                 !FloatingLyricsPrefs.showTranslation(this@FloatingLyricsService)
             )
+            refreshLyricText()   // 立即应用到歌词行（翻译并入当前句），不等下次换行/收回面板
             showPanel(animate = false)
         })
         col.addView(opsRow1)
@@ -816,46 +908,127 @@ class FloatingLyricsService : Service() {
         col.addView(sectionLabel("背景显示"))
         col.addView(segmentedTwoState(
             listOf("不透明", "透明"),
-            if (FloatingLyricsPrefs.isOpaque(this)) 0 else 1
+            if (FloatingLyricsPrefs.isOpaque(this)) 0 else 1,
+            listOf(R.drawable.ic_fl_palette, R.drawable.ic_fl_remove)   // 语义图标：实色填充 / 无背景
         ) { i ->
             FloatingLyricsPrefs.setOpaque(this@FloatingLyricsService, i == 0)
+            applyCardBackground()   // 立即生效，不等 250ms 自愈轮询/收回面板
             showPanel(animate = false)
         })
 
         // ---- 文字颜色 ----
         col.addView(sectionLabel("文字颜色"))
-        val tRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val tColors = listOf(
-            Color.WHITE, Color.BLACK, Color.argb(255, 255, 213, 79),
-            Color.argb(255, 100, 181, 246), Color.argb(255, 129, 199, 132), Color.argb(255, 255, 138, 128)
-        )
+        val curC = FloatingLyricsPrefs.lyricColorIndex(this)
+        val cRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        lyricColorSets.forEachIndexed { ci, cs ->
+            cRow.addView(colorDot(cs.currentColor, curC == ci) {
+                FloatingLyricsPrefs.setLyricColorIndex(this, ci)
+                restyleInPlace()
+                showPanel(animate = false)   // 同步面板选中态
+            })
+        }
+        col.addView(cRow)
+
+        // ---- 自定义文字颜色（用户自己调色）----
+        col.addView(sectionLabel("自定义文字颜色"))
         val curT = FloatingLyricsPrefs.textColor(this)
-        tColors.forEach { c ->
-            tRow.addView(colorDot(c, curT == c) {
-                // 文字色板必须真正生效：选色后自动关闭「当前行跟随动态色」，
-                // 否则 restyleInPlace 的 accent 会盖掉用户选的颜色。
-                FloatingLyricsPrefs.setTextColor(this@FloatingLyricsService, c)
-                FloatingLyricsPrefs.setUseAccentForCurrent(this@FloatingLyricsService, false)
+        // 选中态与 restyleInPlace 同一判断：仅自定义模式（索引 -1）且颜色相等才高亮，
+        // 避免预设与自定义点同时选中。
+        val customTextActive = FloatingLyricsPrefs.lyricColorIndex(this) == -1
+        val tScroll = android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val tRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        listOf(
+            0xFFFFFFFF.toInt(), 0xFF000000.toInt(), 0xFFFFD54F.toInt(), 0xFF64B5F6.toInt(),
+            0xFF81C784.toInt(), 0xFFFF8A80.toInt(), 0xFFFF69B4.toInt(), 0xFFB39DDB.toInt()
+        ).forEach { argb ->
+            tRow2.addView(colorDot(argb, customTextActive && curT == argb) {
+                FloatingLyricsPrefs.setTextColor(this, argb)
+                FloatingLyricsPrefs.setUseAccentForCurrent(this, false)
+                FloatingLyricsPrefs.setLyricColorIndex(this, -1)   // 退出预设，改走自定义
+                restyleInPlace()
                 showPanel(animate = false)
             })
         }
-        col.addView(tRow)
+        tScroll.addView(tRow2)
+        col.addView(tScroll)
 
-        // ---- 背景颜色 ----
         col.addView(sectionLabel("背景颜色"))
-        val bRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val bColors = listOf(Color.BLACK, Color.WHITE)
-        val curB = FloatingLyricsPrefs.bgColor(this)
-        bColors.forEach { c ->
-            bRow.addView(colorDot(c, curB == c) {
-                FloatingLyricsPrefs.setBgColor(this@FloatingLyricsService, c)
-                showPanel(animate = false)
+        val curB = FloatingLyricsPrefs.lyricBgIndex(this)
+        val bRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        lyricBgSets.forEachIndexed { bi, bs ->
+            bRow.addView(colorDot(bs.color, curB == bi) {
+                FloatingLyricsPrefs.setLyricBgIndex(this, bi)
+                applyCardBackground()
+                showPanel(animate = false)   // 同步面板选中态
             })
         }
         col.addView(bRow)
 
-        // ---- 字号 ----
-        col.addView(sectionLabel("字号"))
+        // ---- 自定义背景颜色（用户自己调色）----
+        col.addView(sectionLabel("自定义背景颜色"))
+        val curB2 = FloatingLyricsPrefs.bgColor(this)
+        // 选中态与 applyCardBackground 同一判断：仅自定义模式（索引 -1）且颜色相等才高亮。
+        val customBgActive = FloatingLyricsPrefs.lyricBgIndex(this) == -1
+        val bScroll = android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val bRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        listOf(
+            0xFFFFFFFF.toInt(), 0xFF000000.toInt(), 0xFF424242.toInt(), 0xFF1A237E.toInt(),
+            0xFF4A148C.toInt(), 0xFFBF360C.toInt(), 0xFFF5F9FF.toInt(), 0xFF1B1B1F.toInt()
+        ).forEach { argb ->
+            bRow2.addView(colorDot(argb, customBgActive && curB2 == argb) {
+                FloatingLyricsPrefs.setBgColor(this, argb)
+                FloatingLyricsPrefs.setLyricBgIndex(this, -1)      // 退出预设，改走自定义
+                applyCardBackground()
+                showPanel(animate = false)
+            })
+        }
+        bScroll.addView(bRow2)
+        col.addView(bScroll)
+
+        // 窗口宽度 / 高度（照搬 Lua：280-400 / 120-200）
+        col.addView(sectionLabel("窗口宽度: " + FloatingLyricsPrefs.windowWidthDp(this@FloatingLyricsService) + "dp"))
+        val wRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        wRow.addView(stepButton(R.drawable.ic_fl_remove) {
+            val v = FloatingLyricsPrefs.windowWidthDp(this@FloatingLyricsService) - 10
+            FloatingLyricsPrefs.setWindowWidthDp(this@FloatingLyricsService, v)
+            applyCardBackground(); applyWindow()
+            showPanel(animate = false)   // 同步面板文案
+        })
+        wRow.addView(TextView(this).apply {
+            text = FloatingLyricsPrefs.windowWidthDp(this@FloatingLyricsService).toString() + "dp"
+            textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        wRow.addView(stepButton(R.drawable.ic_fl_add) {
+            val v = FloatingLyricsPrefs.windowWidthDp(this@FloatingLyricsService) + 10
+            FloatingLyricsPrefs.setWindowWidthDp(this@FloatingLyricsService, v)
+            applyCardBackground(); applyWindow()
+            showPanel(animate = false)   // 「+」之前漏了重建面板：值变了但标签不刷新，看起来像没反应
+        })
+        col.addView(wRow)
+
+        col.addView(sectionLabel("窗口高度: " + FloatingLyricsPrefs.windowHeightDp(this@FloatingLyricsService) + "dp"))
+        val hRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        hRow.addView(stepButton(R.drawable.ic_fl_remove) {
+            val v = FloatingLyricsPrefs.windowHeightDp(this@FloatingLyricsService) - 10
+            FloatingLyricsPrefs.setWindowHeightDp(this@FloatingLyricsService, v)
+            applyWindow()
+            showPanel(animate = false)   // 同步面板文案
+        })
+        hRow.addView(TextView(this).apply {
+            text = FloatingLyricsPrefs.windowHeightDp(this@FloatingLyricsService).toString() + "dp"
+            textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        hRow.addView(stepButton(R.drawable.ic_fl_add) {
+            val v = FloatingLyricsPrefs.windowHeightDp(this@FloatingLyricsService) + 10
+            FloatingLyricsPrefs.setWindowHeightDp(this@FloatingLyricsService, v)
+            applyWindow()
+            showPanel(animate = false)   // 「+」之前漏了重建面板：同宽度「+」
+        })
+        col.addView(hRow)
+
+                col.addView(sectionLabel("字号"))
         val fsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -865,6 +1038,7 @@ class FloatingLyricsService : Service() {
                 this@FloatingLyricsService,
                 FloatingLyricsPrefs.fontSize(this@FloatingLyricsService) - 2
             )
+            restyleInPlace()   // 立即应用到歌词行，不等 250ms 轮询
             showPanel(animate = false)
         })
         fsRow.addView(TextView(this).apply {
@@ -880,6 +1054,7 @@ class FloatingLyricsService : Service() {
                 this@FloatingLyricsService,
                 FloatingLyricsPrefs.fontSize(this@FloatingLyricsService) + 2
             )
+            restyleInPlace()   // 立即应用到歌词行，不等 250ms 轮询
             showPanel(animate = false)
         })
         col.addView(fsRow)
@@ -912,20 +1087,30 @@ class FloatingLyricsService : Service() {
 
         // 歌词与面板都常驻窗口内：切换只改 visibility/alpha，窗口根 view 不重建
         lyricView = buildLyricView()
+        // 关键：歌词视图必须**撑满固定尺寸的窗口**（MATCH_PARENT）。
+        // 之前是 WRAP_CONTENT，内容贴着自身高度，root 的 Gravity.CENTER 就没有可居中的空间，
+        // 表现就是「文字在长方体里不居中」。
         r.addView(
             lyricView,
             FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
         panelHost = FrameLayout(this).apply {
             visibility = View.GONE
             alpha = 0f
+            // 面板自带固定深色圆角背景：绝不跟随歌词卡片底色。
+            // 否则用户把卡片底色设成白色后，面板变成白底白字，内容完全看不清。
+            background = GradientDrawable().apply {
+                cornerRadius = dp(24).toFloat()
+                setColor(0xF21B1B1F.toInt())
+                setStroke(dp(1), Color.argb(38, 255, 255, 255))
+            }
         }
         r.addView(
             panelHost,
             FrameLayout.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
 
@@ -1083,17 +1268,22 @@ class FloatingLyricsService : Service() {
         val nxt = FloatingLyricsState.nextLine
         prevText?.visibility = if (prev.isNotBlank() && FloatingLyricsPrefs.showPrevNext(this)) View.VISIBLE else View.GONE
         nextText?.visibility = if (nxt.isNotBlank() && FloatingLyricsPrefs.showPrevNext(this)) View.VISIBLE else View.GONE
+        // 三行结构：翻译并入当前句第二行（Spannable 缩小字号），行数恒为三行、尺寸恒定
         val show = FloatingLyricsPrefs.showTranslation(this) &&
             FloatingLyricsState.currentTranslation.isNotBlank()
-        transText?.visibility = if (show) View.VISIBLE else View.GONE
+        val curTxt = cur.ifBlank { "美好不期而遇" }
+        val mainPayload: CharSequence = if (show) {
+            val sp = android.text.SpannableString(curTxt + "\n" + FloatingLyricsState.currentTranslation)
+            val st = curTxt.length + 1
+            sp.setSpan(android.text.style.RelativeSizeSpan(0.62f), st, sp.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            sp
+        } else curTxt
         applyLinesSmooth(listOfNotNull(
             prevText to prev,
-            mainText to cur.ifBlank { "美好不期而遇" },
-            (if (show) transText else null) to FloatingLyricsState.currentTranslation,
+            mainText to mainPayload,
             nextText to nxt
         ))
         restyleInPlace()
-        // 文案/字号变化后强制窗口重新贴合内容（尺寸一律走 updateViewLayout）
         applyWindow()
     }
 
@@ -1105,15 +1295,11 @@ class FloatingLyricsService : Service() {
 
     /** 目标窗口宽度：面板固定宽，歌词按内容自适应。 */
     private fun targetWidth(): Int =
-        if (showingPanel) dp(PANEL_WIDTH_DP) else {
-            val pct = FloatingLyricsPrefs.cardWidthPercent(this)
-            if (pct >= 100) WindowManager.LayoutParams.WRAP_CONTENT
-            else (resources.displayMetrics.widthPixels * pct / 100)
-        }
+        if (showingPanel) dp(PANEL_WIDTH_DP) else cardFixedWidthPx()
 
     /** 面板窗口高度：按真实内容高度，最多占屏幕 72%；歌词形态则自适应内容。 */
     private fun targetHeight(): Int {
-        if (!showingPanel) return WindowManager.LayoutParams.WRAP_CONTENT
+        if (!showingPanel) return cardFixedHeightPx()
         val maxPanelHeight = (resources.displayMetrics.heightPixels * 0.72f).toInt()
         return if (panelContentHeight > 0) panelContentHeight.coerceAtMost(maxPanelHeight) else maxPanelHeight
     }
@@ -1194,83 +1380,56 @@ class FloatingLyricsService : Service() {
 
     /** 歌词文字样式：上一行/下一行淡出、当前行加粗高亮（动态色）、翻译行弱化。 */
     private fun restyleInPlace() {
+        // 照搬 main.lua：三行颜色完全由预设组决定（主行 +2 号粗体当前色，上下行半透明同色），
+        // 阴影同样来自预设 —— 用户在面板切换「文字颜色」就是切换预设组。
+        // 自定义色（lyricColorIndex == -1）不走预设：主行直接用用户选的 textColor，
+        // 上下行同色 60% 透明，阴影按 textColor 对比度生成 —— 之前索引 -1 被 clamp 成 0，
+        // 永远显示预设色，自定义色根本没应用（「点了不更新」的根因）。
+        val ci = FloatingLyricsPrefs.lyricColorIndex(this)
+        val custom = ci == -1
+        val cs = currentLyricColorSet()   // 仅预设分支使用；-1 时被 clamp 的值不参与配色
         val userColor = FloatingLyricsPrefs.textColor(this)
-        val accent = FloatingLyricsPrefs.accentColor(this)
+        val mainColor = if (custom) userColor else cs.currentColor
+        val otherColor = if (custom) withAlpha(userColor, 153) else cs.otherColor
+        val shadowColor = if (custom) LyricContrast.shadowFor(userColor) else cs.shadowColor
         val fs = FloatingLyricsPrefs.fontSize(this).toFloat()
-        val opaque = FloatingLyricsPrefs.isOpaque(this)
-        val curColor = if (FloatingLyricsPrefs.useAccentForCurrent(this)) accent else userColor
-        val dimAlpha = if (opaque) 120 else 152
-        // 与 applyCardBackground 保持同一套「自动底色」，淡出行的 alpha 依据它计算
-        adaptedBg = LyricContrast.readableBg(curColor, FloatingLyricsPrefs.bgColor(this), 4.5)
-        val dimColor = if (opaque) dimOver(adaptedBg, userColor, dimAlpha) else withAlpha(userColor, dimAlpha)
-        val transColor = if (opaque) dimOver(adaptedBg, userColor, 172, 2.5) else withAlpha(userColor, 172)
-
-        // ── 新增可调项在此生效 ──
+        // 排版偏好（设置页「排版」卡写入）：加粗 / 对齐 / 行间距 —— 旧版全部写死，设置因此不生效
         val bold = FloatingLyricsPrefs.bold(this)
-        val showPN = FloatingLyricsPrefs.showPrevNext(this)
-        val lineGap = dp(FloatingLyricsPrefs.lineSpacing(this)).toFloat()
-        val align = FloatingLyricsPrefs.align(this)
-
-        // 对齐：0 左 / 1 居中 / 2 右（同时作用于文字与容器）
-        val lineGravity = when (align) {
+        val lineGravity = when (FloatingLyricsPrefs.align(this).coerceIn(0, 2)) {
             0 -> Gravity.START
             2 -> Gravity.END
             else -> Gravity.CENTER
         }
-        lyricView?.gravity = when (align) {
-            0 -> Gravity.START
-            2 -> Gravity.END
-            else -> Gravity.CENTER_HORIZONTAL
-        }
+        val gapPx = dp(FloatingLyricsPrefs.lineSpacing(this).coerceIn(0, 12))
+        // 「阴影强度」0..100：按百分比缩放阴影色 alpha（100 = 预设原强度）
+        val shadowPct = FloatingLyricsPrefs.shadowAlphaPercent(this).coerceIn(0, 100)
+        val shadowColored = withAlpha(shadowColor, Color.alpha(shadowColor) * shadowPct / 100)
+        lyricView?.gravity = Gravity.CENTER   // 垂直居中；水平对齐由各行 gravity 按偏好设置
         val padH = dp(FloatingLyricsPrefs.paddingHDp(this))
-        lyricView?.setPadding(padH, dp(16), padH, dp(16))
+        lyricView?.setPadding(padH, dp(12), padH, dp(12))
 
-        prevText?.apply {
-            setTextColor(dimColor)
-            textSize = fs * 0.78f
-            setTypeface(Typeface.create(typeface, Typeface.NORMAL))
-            gravity = lineGravity
-            setLineSpacing(lineGap, 1f)
-        }
-        nextText?.apply {
-            setTextColor(dimColor)
-            textSize = fs * 0.78f
-            setTypeface(Typeface.create(typeface, Typeface.NORMAL))
-            gravity = lineGravity
-            setLineSpacing(lineGap, 1f)
-        }
-        mainText?.apply {
-            setTextColor(curColor)
-            textSize = fs
-            setTypeface(Typeface.create(typeface, if (bold) Typeface.BOLD else Typeface.NORMAL))
-            gravity = lineGravity
-            setLineSpacing(lineGap, 1f)
-        }
-        val show = FloatingLyricsPrefs.showTranslation(this) &&
-            FloatingLyricsState.currentTranslation.isNotBlank()
-        transText?.visibility = if (show) View.VISIBLE else View.GONE
-        if (show) {
-            transText?.apply {
-                setTextColor(transColor)
-                textSize = fs * 0.68f
-                setTypeface(Typeface.create(typeface, Typeface.NORMAL))
-                gravity = lineGravity
+        lyricTextViews.forEachIndexed { idx, tv ->
+            tv.setPadding(0, gapPx, 0, gapPx)   // 行间距跟「行间距」偏好走（0dp = 三行紧贴）
+            if (idx == 1) {
+                tv.setTextSize(fs + 2f)
+                tv.setTypeface(if (bold) Typeface.DEFAULT_BOLD else Typeface.create(Typeface.DEFAULT, Typeface.NORMAL))
+                tv.setTextColor(mainColor)
+                tv.setShadowLayer(dp(4).toFloat(), 0f, 0f, shadowColored)
+            } else {
+                tv.setTextSize(fs)
+                tv.setTypeface(Typeface.create(tv.typeface, Typeface.NORMAL))
+                tv.setTextColor(otherColor)
+                tv.setShadowLayer(dp(3).toFloat(), 0f, 0f, shadowColored)
             }
+            tv.gravity = lineGravity
         }
-        // 上一句/下一句总开关
-        if (!showPN) {
-            prevText?.visibility = View.GONE
-            nextText?.visibility = View.GONE
-        }
-        applyTextShadow(opaque, curColor, userColor, fs)
+        val showPN = FloatingLyricsPrefs.showPrevNext(this)
+        prevText?.visibility = if (showPN) View.VISIBLE else View.GONE
+        nextText?.visibility = if (showPN) View.VISIBLE else View.GONE
         applyCardBackground()
     }
 
-    /**
-     * 文字阴影（真正的可读性兜底）：
-     * 浅色文字配深阴影、深色文字配浅阴影，透明/半透明底色下同样清晰。
-     */
-    private fun applyTextShadow(opaque: Boolean, mainColor: Int, userColor: Int, fontSize: Float) {
+        private fun applyTextShadow(opaque: Boolean, mainColor: Int, userColor: Int, fontSize: Float) {
         // 不透明底色已经由 readableBg 保证对比度，阴影轻一点；透明底色完全靠阴影兜底，重一点。
         val radius = (fontSize * (if (opaque) 0.22f else 0.34f)).coerceIn(1.5f, 9f)
         val dy = (fontSize * 0.055f).coerceIn(0.5f, 2.5f)
@@ -1337,6 +1496,12 @@ class FloatingLyricsService : Service() {
                     MotionEvent.ACTION_UP -> {
                         if (moved) {
                             clampIntoScreen(params)
+                            // 「松手吸附屏幕边缘」偏好：吸附到最近的左右边缘（默认关，行为不变）
+                            if (FloatingLyricsPrefs.snapToEdge(this@FloatingLyricsService)) {
+                                val w = (root?.width ?: 0).takeIf { it > 0 } ?: dp(240)
+                                val right = (resources.displayMetrics.widthPixels - w).coerceAtLeast(0)
+                                params.x = if (abs(params.x) <= abs(params.x - right)) 0 else right
+                            }
                             root?.let { r -> runCatching { windowManager.updateViewLayout(r, params) } }
                             FloatingLyricsPrefs.setX(this@FloatingLyricsService, params.x)
                             FloatingLyricsPrefs.setY(this@FloatingLyricsService, params.y)
@@ -1403,7 +1568,14 @@ class FloatingLyricsService : Service() {
                     FloatingLyricsPrefs.lineSpacing(this@FloatingLyricsService) +
                     FloatingLyricsPrefs.align(this@FloatingLyricsService) +
                     FloatingLyricsPrefs.cornerRadiusDp(this@FloatingLyricsService) +
-                    FloatingLyricsPrefs.paddingHDp(this@FloatingLyricsService)
+                    FloatingLyricsPrefs.paddingHDp(this@FloatingLyricsService) +
+                    FloatingLyricsPrefs.windowWidthDp(this@FloatingLyricsService) +
+                    FloatingLyricsPrefs.windowHeightDp(this@FloatingLyricsService) +
+                    FloatingLyricsPrefs.cardWidthPercent(this@FloatingLyricsService) +
+                    FloatingLyricsPrefs.shadowAlphaPercent(this@FloatingLyricsService) +
+                    FloatingLyricsPrefs.lyricColorIndex(this@FloatingLyricsService) +
+                    FloatingLyricsPrefs.lyricBgIndex(this@FloatingLyricsService) +
+                    FloatingLyricsPrefs.showBorder(this@FloatingLyricsService)
                 if (sig != lastSig) {
                     lastSig = sig
                     restyleInPlace()

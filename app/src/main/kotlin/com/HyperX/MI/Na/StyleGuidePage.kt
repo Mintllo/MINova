@@ -1,6 +1,7 @@
 package com.HyperX.MI.Na
 
 import android.content.Context
+import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LibraryMusic
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Waves
@@ -95,7 +97,10 @@ fun StyleGuidePage(
     currentKeyColor: Int = 0,
     onKeyColor: (Int) -> Unit = {},
 ) {
-    var choice by remember { mutableStateOf<Boolean?>(null) }
+    // 液态玻璃风格依赖 RuntimeShader/AGSL（API 33+）：低版本禁选并自动回退兼容风格（MD3）
+    val liquidSupported = liquidGlassSupported
+    // 低版本直接预选 Material Design 3（列表里第一个不依赖 shader 的风格），液态玻璃卡片置灰不可选
+    var choice by remember { mutableStateOf(if (liquidSupported) null else false) }
     var appeared by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) { appeared = true }
@@ -186,8 +191,14 @@ fun StyleGuidePage(
                         )
                     },
                     title = "液态玻璃",
-                    desc = "全界面液态玻璃，更加新颖的观感",
-                    onClick = { choice = true }
+                    desc = if (liquidSupported) "全界面液态玻璃，更加新颖的观感"
+                           else "$LIQUID_GLASS_REQUIRE_TEXT，当前设备不可选",
+                    enabled = liquidSupported,
+                    onClick = {
+                        if (liquidSupported) choice = true
+                        // 置灰仍可点：弹应用内提示（AppToast，非系统 Toast）
+                        else AppToast.show("该风格$LIQUID_GLASS_REQUIRE_TEXT")
+                    }
                 )
             }
             Spacer(modifier = Modifier.height(14.dp))
@@ -382,8 +393,11 @@ fun StyleGuidePage(
                         )
                     }
                     Spacer(Modifier.height(10.dp))
+                    // 壁纸能力提示：液态玻璃风格支持自定义壁纸（主界面会绘制自定义背景），
+                    // 仅 Material Design 3 暂不支持 —— 按当前选择给出准确提示
                     Text(
-                        "提示：当前风格暂不支持自定义壁纸",
+                        if (choice == false) "提示：Material Design 3 风格暂不支持自定义壁纸"
+                        else "提示：当前风格支持自定义壁纸，可在「设置 → 主题与个性化」中更换",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -400,6 +414,8 @@ private fun StyleOptionCard(
     title: String,
     desc: String,
     onClick: () -> Unit,
+    /** false = 该风格当前设备不可用（如液态玻璃需要 Android 13+）：内容置灰 + 右侧锁图标角标，仍可点击弹提示 */
+    enabled: Boolean = true,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -434,22 +450,47 @@ private fun StyleOptionCard(
             .padding(18.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        icon()
-        Spacer(modifier = Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(desc, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 17.sp)
-        }
-                AnimatedVisibility(
-            visible = selected,
-            enter = scaleIn(
-                animationSpec = Motion.bouncy(),
-                initialScale = 0.4f
-            ) + fadeIn(Motion.enter()),
-            exit = scaleOut(Motion.exit()) + fadeOut(Motion.exit())
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .graphicsLayer { alpha = if (enabled) 1f else 0.38f },
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.primary)
+            icon()
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(desc, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 17.sp)
+            }
+        }
+        if (!enabled) {
+            // 角标：锁图标 + 「需要 Android 13+」小字（保持全不透明，保证可读）
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Rounded.Lock, null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    LIQUID_GLASS_REQUIRE_TEXT,
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+                AnimatedVisibility(
+                visible = selected,
+                enter = scaleIn(
+                    animationSpec = Motion.bouncy(),
+                    initialScale = 0.4f
+                ) + fadeIn(Motion.enter()),
+                exit = scaleOut(Motion.exit()) + fadeOut(Motion.exit())
+            ) {
+                Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.primary)
+            }
         }
     }
 }

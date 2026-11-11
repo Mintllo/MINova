@@ -11,15 +11,23 @@ android {
         applicationId = "com.HyperX.MI.Na"
         minSdk = 24
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.3.1"
+        versionCode = 22
+        versionName = "1.3.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            // Only ship the dominant phone ABI + the emulator ABI.
-            // Previously all four ABIs (x86/x86_64/armeabi-v7a/arm64-v8a) were bundled,
-            // which alone accounted for ~100 MB of native libraries.
-            abiFilters.addAll(["arm64-v8a", "x86_64"])
+            // 主流手机 ABI（arm64 + 32 位兼容 armeabi-v7a）+ 模拟器 ABI（x86_64）。
+            // 早期曾打包全部四个 ABI（含 x86），native 库一度占 ~100 MB，已裁剪。
+            abiFilters.addAll(["arm64-v8a", "armeabi-v7a", "x86_64"])
+        }
+    }
+
+    // NDK 热点路径模块（libminova.so，纯计算）：波浪预计算 / LRC 解析 / FNV-1a 指纹。
+    // Kotlin 侧 com.HyperX.MI.Na.native.NativeBridge 统一入口，加载失败自动走 Kotlin 兜底。
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 

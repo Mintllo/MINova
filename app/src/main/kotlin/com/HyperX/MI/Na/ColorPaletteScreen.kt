@@ -276,13 +276,20 @@ fun ColorPaletteScreen(
                 index = 0, count = 1,
                 icon = Icons.Rounded.Palette,
                 title = "应用风格",
-                summary = "全局组件风格，导航栏可独立设置",
+                summary = if (liquidGlassSupported) "全局组件风格，导航栏可独立设置"
+                          else "液态玻璃$LIQUID_GLASS_REQUIRE_TEXT，仅可使用 Material Design 3",
                 items = listOf("液态玻璃", "Material Design 3"),
                 selectedIndex = if (viewModel.md3Style) 1 else 0,
                 valueText = if (viewModel.md3Style) "Material Design 3" else "液态玻璃",
                 onSelect = { i: Int ->
-                    viewModel.md3Style = i == 1
-                    viewModel.savePreferences()
+                    if (i == 0 && !liquidGlassSupported) {
+                        // 液态玻璃风格依赖 RuntimeShader/AGSL（API 33+）：低版本禁选，
+                        // 点击弹应用内提示，选择保持 Material Design 3（viewModel.md3Style 已在启动时强制为 true）
+                        AppToast.show("该风格$LIQUID_GLASS_REQUIRE_TEXT")
+                    } else {
+                        viewModel.md3Style = i == 1
+                        viewModel.savePreferences()
+                    }
                 }
             )
         }
@@ -292,8 +299,10 @@ fun ColorPaletteScreen(
                 index = 0, count = 4,
                 icon = Icons.Rounded.Layers,
                 title = "液态玻璃导航栏",
-                summary = "悬浮玻璃底栏",
+                summary = if (liquidGlassSupported) "悬浮玻璃底栏"
+                          else "$LIQUID_GLASS_REQUIRE_TEXT，已回退经典导航栏",
                 checked = viewModel.useFloatingNavBar,
+                enabled = liquidGlassSupported,
                 onCheckedChange = {
                     viewModel.useFloatingNavBar = it
                     viewModel.savePreferences()
@@ -303,8 +312,10 @@ fun ColorPaletteScreen(
                 index = 1, count = 4,
                 icon = Icons.Rounded.BlurOn,
                 title = "玻璃模糊效果",
-                summary = "半透明毛玻璃与边缘折射",
+                summary = if (liquidGlassSupported) "半透明毛玻璃与边缘折射"
+                          else "$LIQUID_GLASS_REQUIRE_TEXT，不可开启",
                 checked = viewModel.navBarLiquidGlass,
+                enabled = liquidGlassSupported,
                 onCheckedChange = {
                     viewModel.navBarLiquidGlass = it
                     viewModel.savePreferences()
@@ -426,6 +437,7 @@ internal fun KsuSegSwitch(
     title: String,
     summary: String?,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
         SegmentedSwitchItem(
@@ -435,6 +447,7 @@ internal fun KsuSegSwitch(
         title = title,
         summary = summary,
         checked = checked,
+        enabled = enabled,
         onCheckedChange = onCheckedChange
     )
 }
@@ -469,6 +482,7 @@ internal fun KsuExpressiveDropdown(
     items: List<String>,
     selectedIndex: Int,
     valueText: String,
+    enabled: Boolean = true,
     onSelect: (Int) -> Unit,
 ) {
     SegmentedDropdownItem(
@@ -479,6 +493,7 @@ internal fun KsuExpressiveDropdown(
         summary = summary,
         items = items,
         selectedIndex = selectedIndex,
+        enabled = enabled,
         onItemSelected = onSelect
     )
 }

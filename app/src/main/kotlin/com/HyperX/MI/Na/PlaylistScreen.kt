@@ -12,6 +12,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -573,7 +574,7 @@ fun PlaylistScreen(viewModel: PlayerViewModel, onBack: () -> Unit, backdrop: Bac
                 PlaylistStore.savePlaylist(context, pl.copy(songs = pl.songs + ps))
                 addTarget = null
                 refresh()
-                android.widget.Toast.makeText(context, "已加入「${pl.name}」", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("已加入「${pl.name}」")
             }
         )
     }
@@ -958,11 +959,12 @@ private fun PlaylistSongCover(song: PlaylistSong, size: androidx.compose.ui.unit
                 modifier = Modifier.fillMaxSize()
             )
         } else {
-            Icon(
-                Icons.Rounded.MusicNote,
-                null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp)
+            // 无封面兜底：统一封面占位图铺满（原为 MusicNote 图标）
+            Image(
+                painter = painterResource(R.drawable.fallback_cover),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
             )
         }
     }

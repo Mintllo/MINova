@@ -62,7 +62,7 @@ import java.net.URLEncoder
  * go-music-api 服务端地址的默认占位值。
  *
  * ⚠️ 请替换为你自己部署的实例地址（代码里不写死任何私有 IP）：
- *   - Android 模拟器访问宿主机：`https://YOUR_API_HOST:PORT/music-api`
+ *   - Android 模拟器访问宿主机：`https://8.148.84.2:6472/music-api`
  *   - 真机 / 局域网：`http://<你的服务器地址>:8080`，例如 `http://192.168.1.23:8080`
  *   - 公网 / 反代：`https://your-domain.com`
  *
@@ -366,7 +366,7 @@ object MusicApiClient {
      *   网易云直链（m701.music.126.net）   → onPrepared 稳定 31~32 秒
      * 所以跨源候选同分时优先选 kuwo/kugou，网易云放最后（用户反馈"要等很久才自动播放"）。
      */
-    private val PREFERRED_SOURCES = listOf("kuwo", "kugou", "migu", "bilibili", "qq", "netease")
+    private val PREFERRED_SOURCES = listOf("kuwo", "migu", "bilibili", "qq", "netease")
 
     /** 跨源匹配允许的最大时长差（秒）。 */
     private const val STRICT_DURATION_TOLERANCE_SEC = 3L

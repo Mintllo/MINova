@@ -5,8 +5,11 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.foundation.layout.ColumnScope
+import com.HyperX.MI.Na.native.NativeBridge
 import kotlin.math.roundToInt
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
+import androidx.compose.ui.res.painterResource
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.draw.clip
 
@@ -28,7 +31,7 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.view.WindowManager
-import android.widget.Toast
+
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -78,6 +81,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.MutatorMutex
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -345,9 +350,13 @@ class MusicApiService {
     /** 空结果短缓存：防止「换一批」反复重打后端、越刷新越拿不到 */
     private val emptyCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    suspend fun search(keyword: String): Result<List<Song>> = withContext(Dispatchers.IO) {
+    suspend fun search(
+            keyword: String,
+            sources: List<String> = listOf("netease"),
+        ): Result<List<Song>> = withContext(Dispatchers.IO) {
         // 10 分钟内同关键词走缓存，避免重复请求造成限流假死
-        searchCache[keyword]?.let { (t, v) ->
+        val cacheKey = keyword + "#" + sources.hashCode()
+        searchCache[cacheKey]?.let { (t, v) ->
             if (System.currentTimeMillis() - t < 10 * 60_000L) return@withContext Result.success(v)
         }
         // 优先自建免费聚合搜索（网易云/QQ/酷狗/B站）
@@ -395,21 +404,24 @@ class MusicApiService {
         // 这是「有人搜索音乐加载不出来」最有效的兜底。
         // 用户方案：搜索只走网易云（原曲目录最全、原唱命中最高）；
         // 点击播放时再由 resolveNextPlayUrl 去其他平台严格匹配同一首歌（快 CDN 优先）。
-        var free = fetchMerged(listOf("netease"))
+        var free = fetchMerged(sources)
+        if (free.isEmpty()) {
+            free = fetchMerged(listOf("kuwo", "migu", "qianqian", "bilibili", "qq"))
+        }
         if (free.isEmpty()) {
             kotlinx.coroutines.delay(700L)
-            free = fetchMerged(listOf("netease"))
+            free = fetchMerged(sources)
         }
         if (free.isNotEmpty()) {
-            searchCache[keyword] = System.currentTimeMillis() to free
+            searchCache[cacheKey] = System.currentTimeMillis() to free
             return@withContext Result.success(free)
         }
         // 空结果也做 45 秒短缓存，避免「换一批」反复重打后端造成限流恶性循环
-        val emptyAt = emptyCache[keyword]
+        val emptyAt = emptyCache[cacheKey]
         if (emptyAt != null && System.currentTimeMillis() - emptyAt < 45_000L) {
             return@withContext Result.success(emptyList())
         }
-        emptyCache[keyword] = System.currentTimeMillis()
+        emptyCache[cacheKey] = System.currentTimeMillis()
         try {
             val encoded = URLEncoder.encode(keyword, "UTF-8")
             val url = URL("$SEARCH_URL?s=$encoded&type=1&limit=50")
@@ -601,8 +613,50 @@ class MusicApiService {
             }
         }
 
-        lrcText.lines().forEach { feed(it, true) }
-        tlyricText.lines().forEach { feed(it, false) }
+        // ── native 热点路径（libminova.so，可选）────────────────────────────
+        // C++ 侧与 feed() 语义逐条一致：同一时间戳多份文本按出现顺序收集、
+        // 逐字时间戳/增强型 LRC 只取首标签、空文本与 "//" 跳过、trim 对齐
+        // Character.isWhitespace。输出按时间稳定排序的 "mm:ss.xx\t文本"。
+        // native 不可用或失败 → null，走下方原 Kotlin feed 逻辑，行为一致。
+        val nLrc = NativeBridge.parseLrc(lrcText)
+
+        // "mm:ss.xx\t文本" → (毫秒, 文本)：与 native 时间规则互逆（百分秒 ×10 = 毫秒）
+        fun entryTime(e: String): Pair<Long, String>? {
+            val tab = e.indexOf('\t')
+            if (tab <= 0) return null
+            val hms = e.substring(0, tab).split(':')
+            if (hms.size != 2) return null
+            val mm = hms[0].toLongOrNull() ?: return null
+            val dot = hms[1].indexOf('.')
+            if (dot < 0) return null
+            val ss = hms[1].substring(0, dot).toLongOrNull() ?: return null
+            val cs = hms[1].substring(dot + 1)
+            if (ss < 0L || cs.length != 2) return null
+            val frac = cs.toLongOrNull() ?: return null
+            return (mm * 60000 + ss * 1000 + frac * 10) to e.substring(tab + 1)
+        }
+
+        if (nLrc != null) {
+            for (e in nLrc) entryTime(e)?.let { (t, text) ->
+                val list = candidates.getOrPut(t) { mutableListOf() }
+                if (!list.contains(text)) list.add(text)
+                if (!times.contains(t)) times.add(t)
+            }
+            val nTlyric = NativeBridge.parseLrc(tlyricText)
+            if (nTlyric != null) {
+                // 翻译行不进 times（与 feed(it, collectTimes=false) 一致）：
+                // 择优时只挂在 lrc 已有时间戳上，多出的翻译时间戳会被丢弃。
+                for (e in nTlyric) entryTime(e)?.let { (t, text) ->
+                    val list = candidates.getOrPut(t) { mutableListOf() }
+                    if (!list.contains(text)) list.add(text)
+                }
+            } else {
+                tlyricText.lines().forEach { feed(it, false) }
+            }
+        } else {
+            lrcText.lines().forEach { feed(it, true) }
+            tlyricText.lines().forEach { feed(it, false) }
+        }
         times.sort()
 
         // ── 择优：原文优先（假名/谚文 > 汉字 > 其它）──
@@ -644,6 +698,22 @@ class MusicApiService {
 
     fun getFallbackUrl(songId: String): String = "https://music.163.com/song/media/outer/url?id=$songId.mp3"
 }
+
+// ============================================================================
+//  液态玻璃能力门槛（产品层面限制）：RuntimeShader / AGSL 仅 Android 13（API 33）+ 可用。
+//  低版本虽有逐点降级守卫，但这里从产品层面直接禁选：
+//  - 液态玻璃风格（md3Style = false）禁止选择，已选中则启动时自动回退 Material Design 3；
+//  - 液态玻璃导航栏（useFloatingNavBar）与玻璃模糊（navBarLiquidGlass）禁止开启，已开启则强制关闭。
+//  风格 id ↔ 依赖对照：md3Style=false「液态玻璃」→ 依赖 liquid/ 包（Lens/Vibrancy/InnerShadow/
+//  CombinedBackdrop，均基于 RuntimeShader）+ InteractiveHighlight（API 33 守卫）；
+//  md3Style=true「Material Design 3」→ 不依赖 shader，是低版本的兼容回退风格。
+// ============================================================================
+/** 当前设备是否支持液态玻璃效果（RuntimeShader/AGSL 需要 Android 13 / API 33+）。 */
+internal val liquidGlassSupported: Boolean
+    get() = Build.VERSION.SDK_INT >= 33
+
+/** 液态玻璃类选项的统一角标/提示文案。 */
+internal const val LIQUID_GLASS_REQUIRE_TEXT = "需要 Android 13+"
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
     private val apiService = MusicApiService()
@@ -1196,7 +1266,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val url = run {
                     MusicApiClient.resolveUnblockUrl(song.id)?.let { if (it.startsWith("http")) return@run it }
-                    val keys = listOf("kuwo", "migu", "bilibili", "netease", "qq", "kugou")
+                    val keys = listOf("kuwo", "migu", "bilibili", "netease", "qq")
                     for (k in keys) {
                         runCatching { MusicApiClient.resolveSongUrlByName(song.id, song.name, song.artist, k) }
                             .getOrNull()?.let { if (it.startsWith("http")) return@run it }
@@ -1327,6 +1397,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             _currentLyrics.value = LyricData()
             _currentLyricIndex.value = -1
             previewRetryCount = 0
+            playFailStreak = 0   // 手动点歌 = 重新给满重试额度
+
             releasePlayer()
             try {
                 val url = run {
@@ -1340,7 +1412,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     // ② 免费音源优先：酷我 / 咪咕 / B站 的免费曲库命中率最高，
                     // 放最前面能让能放的歌一秒出声，不用先绕一圈 VIP 源。
-                    val keys = listOf("kuwo", "migu", "bilibili", song.source, sourceKey, "netease", "qq", "kugou")
+                    val keys = listOf("kuwo", "migu", "bilibili", song.source, sourceKey, "netease", "qq")
                         .filter { it.isNotBlank() }.distinct()
                     for (k in keys) {
                         // 单个音源最多等 8 秒：之前每源都可能拖十几秒，
@@ -1424,7 +1496,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** 本次播放的候选音源顺序（VIP 歌换源用） */
-    private var playSources: List<String> = listOf("qq", "kugou", "bilibili", "netease")
+    private var playSources: List<String> = listOf("qq", "bilibili", "netease")
     private var playSourceIndex = 0
 
     /** 「同源同 id」快路径是否已试过：换源时不要重复打同一个源。 */
@@ -1436,7 +1508,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
      * 因此：① 同源同 id 快路径只对这几个源用；② 网易云的歌优先走**跨源严格搜索**（kuwo/kugou 在前），
      * 只有跨源都找不到时才退回它自己的直链。
      */
-    private val FAST_CDN_SOURCES = setOf("kuwo", "kugou", "migu", "bilibili")
+    private val FAST_CDN_SOURCES = setOf("kuwo", "migu", "bilibili")
 
     /** 最近一次成功解析实际命中的源（日志用；区别于 song.source） */
     private var lastResolvedSource: String = ""
@@ -1757,11 +1829,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         _duration.value = actual
                         startProgressTracking()
                         updateMediaSession(true)
-                        // 播放已经在进行，后台再尝试换成完整版（换到了 onPrepared 会重新接管）
-                        viewModelScope.launch {
-                            val next = resolveNextPlayUrl(song)
-                            if (next != null && startPrepare(next)) _currentPosition.value = 0
-                        }
+                        // 不再后台换源：换源会 reset 播放器，一旦新链失败就变成
+                        // 「播到一半弹没音源」。试听段播完后自然 playNext 换下一首。
                         return@setOnPreparedListener
                     }
                     // 重试到上限仍只拿到试听片段 → 跳到下一首并提示，绝不再原地重试
@@ -1801,22 +1870,41 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
                 setOnErrorListener { player, _, _ ->
+                    // 播放中流中断（URL 过期/网络抖动）：reset 会清掉播放位置，
+                    // 先在 reset 之前记下断点，重解成功后从这里继续播。
+                    val resumePos = _currentPosition.value
                     player.reset()
                     // 网易云的 outer 接口只能用网易云自己的 id。
                     // 别的平台（B站/酷我/酷狗…）的 id 丢进去，网易云会返回"同 id 的另一首歌"，
                     // 于是歌名/封面/歌词都对、声音却完全是另一首歌。非网易云一律跳过。
                     if (!song.source.equals("netease", ignoreCase = true) || neteaseFallbackTried) {
-                        playFailStreak++
-                        if (playFailStreak >= 3) {
-                            // 连续三首都拿不到音源 → 停止自动跳过，交给用户决定。
-                            // 否则会一路狂跳，而且跳到的多半也是没音源的歌。
-                            _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
-                            _isPlaying.value = false
-                            return@setOnErrorListener true
+                        // 播放到一半的流错误（网络抖动）≠「没找到音源」：
+                        // 静默重解同一首歌，拿到新直链就从断点续播；
+                        // 失败只暂停并提示 —— 不 playNext、不计入 playFailStreak
+                        //（那是「连续多首没音源」的计数；网络问题累积它，
+                        //  会让用户重播同一首时被误判成「连续多首找不到可用音源」）。
+                        viewModelScope.launch {
+                            // 重置源遍历状态：playSourceIndex/ownSourceTried 只在 playSong() 里重置，
+                            // 起播时已把索引消耗到末尾，不重置的话播放中重解必然直接返回 null。
+                            playSourceIndex = 0
+                            ownSourceTried = false
+                            val u = runCatching {
+                                kotlinx.coroutines.withTimeoutOrNull(8_000) { resolveNextPlayUrl(song) }
+                            }.getOrNull()
+                            if (!u.isNullOrBlank() && u.startsWith("http")) {
+                                runCatching {
+                                    // 断点交给挂起 seek：onPrepared 开头 applyPendingSeek(mp)
+                                    // 会 seekTo(resumePos) 再 start → 从中断处继续，而不是从 0 重播。
+                                    pendingSeekSongId = song.id
+                                    pendingSeekMs = resumePos
+                                    player.setDataSource(u)
+                                    player.prepareAsync()
+                                }
+                            } else {
+                                _toastMessage.value = "网络波动，播放已暂停"
+                                _isPlaying.value = false
+                            }
                         }
-                        _toastMessage.value = "这首在免费音源里没找到，已跳过"
-                        _isPlaying.value = false
-                        playNext()
                         return@setOnErrorListener true
                     }
                     neteaseFallbackTried = true
@@ -1838,7 +1926,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             playSourceIndex = 0
             ownSourceTried = false
             // 源顺序 = 实测速度顺序：kuwo/kugou 先（prepare 亚秒级），网易云最后（31~32s）
-            playSources = listOf("kuwo", "kugou", "migu", "bilibili", "qq", "netease")
+            playSources = listOf("kuwo", "migu", "qianqian", "bilibili", "qq", "netease")
             // 优先用「上一首播放时预解析的下一首直链」：自动切歌零等待
             val cached = takePrefetched(song)
             if (cached != null) {
@@ -1858,7 +1946,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     " origin=" + song.source + " song=" + song.name
             )
             val ok = firstUrl.isNotBlank() && startPrepare(firstUrl)
-            if (firstUrl.isBlank()) _toastMessage.value = "这首在免费音源里没找到，已跳过"
+            if (firstUrl.isBlank()) {
+                // 用户方案：这首找不到就继续切下一首（连续 3 首失败才停，避免狂跳）
+                playFailStreak++
+                if (playFailStreak < 3) {
+                    _toastMessage.value = "这首在免费音源里没找到，已跳过"
+                    playNext()
+                } else {
+                    _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
+                    _isPlaying.value = false
+                }
+                return@launch
+            }
             if (!ok) {
                 _toastMessage.value = "播放失败，该歌曲可能受版权限制"
                 _isPlaying.value = false
@@ -2147,14 +2246,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun register(username: String, password: String, nickname: String, onResult: (Boolean, String) -> Unit) { viewModelScope.launch(Dispatchers.IO) { try { val json = JSONObject().apply { put("username", username); put("password", password); put("nickname", nickname) }; val conn = URL("${API_BASE_URL}/api/v1/auth/register").openConnection() as HttpURLConnection; conn.requestMethod = "POST"; conn.setRequestProperty("Content-Type", "application/json"); conn.doOutput = true; conn.connectTimeout = 10000; conn.readTimeout = 10000; conn.outputStream.write(json.toString().toByteArray()); conn.outputStream.flush(); conn.outputStream.close(); val code = conn.responseCode; val stream = if (code in 200..299) conn.inputStream else (conn.errorStream ?: conn.inputStream); val text = stream.bufferedReader().readText(); conn.disconnect(); val response = JSONObject(text); if (code in 200..299) { authToken = response.getString("token"); saveTokenToFile(authToken); val u = response.getJSONObject("user"); val userInfo = UserInfo(u.getLong("id"), u.getString("username"), u.getString("nickname"), u.optString("avatar_url", "").ifBlank { u.optString("avatar", "") }, u.optInt("quota", 50), u.optLong("reset_time", 0) * 1000); _currentUser.value = userInfo; _remainingQuota.value = userInfo.quota; _nextResetTime.value = userInfo.resetTime; _isLoggedIn.value = true; saveUserInfoToFile(userInfo); MusicApiClient.refreshUserId(getApplication()); syncPlaylists(); withContext(Dispatchers.Main) { onResult(true, "注册成功") } } else { val errText = conn.errorStream?.bufferedReader()?.readText() ?: text; val errJson = try { JSONObject(errText) } catch (_: Exception) { null }; val errMsg = (errJson?.optJSONObject("error")?.optString("message") ?: errJson?.optString("message") ?: errJson?.optString("error")).orEmpty().ifBlank { when (code) { 401 -> "用户名或密码错误"; 409 -> "该用户名已被注册"; 423, 429 -> "尝试过于频繁，请稍后再试"; else -> "注册失败，请稍后重试" } }; withContext(Dispatchers.Main) { onResult(false, errMsg) } } } catch (e: Exception) { withContext(Dispatchers.Main) { onResult(false, "网络错误") } } } }
 
-    fun uploadAvatar(context: Context, uri: Uri) { viewModelScope.launch(Dispatchers.IO) { try { val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@launch; val boundary = "----FormBoundary${System.currentTimeMillis()}"; val url = URL("${API_BASE_URL}/api/v1/me/avatar"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "POST"; conn.setRequestProperty("Authorization", "Bearer $authToken"); conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary"); conn.doOutput = true; conn.connectTimeout = 15000; conn.readTimeout = 15000; conn.outputStream.use { out -> out.write("--$boundary\r\n".toByteArray()); out.write("Content-Disposition: form-data; name=\"avatar\"; filename=\"avatar.jpg\"\r\n".toByteArray()); out.write("Content-Type: image/jpeg\r\n\r\n".toByteArray()); out.write(bytes); out.write("\r\n--$boundary--\r\n".toByteArray()); out.flush() }; if (conn.responseCode == 200) { val text = conn.inputStream.bufferedReader().readText(); val resp = JSONObject(text); avatarUri = uri; _currentUser.value = _currentUser.value?.copy(avatar = resp.getString("avatar")); _currentUser.value?.let { saveUserInfoToFile(it) }; withContext(Dispatchers.Main) { android.widget.Toast.makeText(context, "上传成功", android.widget.Toast.LENGTH_SHORT).show() } }; conn.disconnect() } catch (e: Exception) { withContext(Dispatchers.Main) { android.widget.Toast.makeText(context, "上传失败", android.widget.Toast.LENGTH_SHORT).show() } } } }
+    fun uploadAvatar(context: Context, uri: Uri) { viewModelScope.launch(Dispatchers.IO) { try { val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@launch; val boundary = "----FormBoundary${System.currentTimeMillis()}"; val url = URL("${API_BASE_URL}/api/v1/me/avatar"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "POST"; conn.setRequestProperty("Authorization", "Bearer $authToken"); conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary"); conn.doOutput = true; conn.connectTimeout = 15000; conn.readTimeout = 15000; conn.outputStream.use { out -> out.write("--$boundary\r\n".toByteArray()); out.write("Content-Disposition: form-data; name=\"avatar\"; filename=\"avatar.jpg\"\r\n".toByteArray()); out.write("Content-Type: image/jpeg\r\n\r\n".toByteArray()); out.write(bytes); out.write("\r\n--$boundary--\r\n".toByteArray()); out.flush() }; if (conn.responseCode == 200) { val text = conn.inputStream.bufferedReader().readText(); val resp = JSONObject(text); avatarUri = uri; _currentUser.value = _currentUser.value?.copy(avatar = resp.getString("avatar")); _currentUser.value?.let { saveUserInfoToFile(it) }; withContext(Dispatchers.Main) { AppToast.show("上传成功") } }; conn.disconnect() } catch (e: Exception) { withContext(Dispatchers.Main) { AppToast.show("上传失败") } } } }
 
 fun useQuota(): Boolean {
         return true
     }
 
 fun watchAd(activity: android.app.Activity) {
-        android.widget.Toast.makeText(activity, "当前版本无广告", android.widget.Toast.LENGTH_SHORT).show()
+        AppToast.show("当前版本无广告")
     }
 
     fun checkAndResetQuota() { if (!_isLoggedIn.value) return; viewModelScope.launch(Dispatchers.IO) { try { val conn = URL("${API_BASE_URL}/api/v1/me").openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.setRequestProperty("Authorization", "Bearer $authToken"); conn.connectTimeout = 5000; conn.readTimeout = 5000; val responseText = conn.inputStream.bufferedReader().use { it.readText() }; conn.disconnect(); val response = JSONObject(responseText); _remainingQuota.value = response.optInt("quota", 50); val resetTime = response.optLong("reset_time", 0) * 1000; _nextResetTime.value = resetTime; _currentUser.value = _currentUser.value?.copy(quota = _remainingQuota.value, resetTime = resetTime); _currentUser.value?.let { saveUserInfoToFile(it) } } catch (_: Exception) {} } }
@@ -2335,17 +2434,16 @@ fun watchAd(activity: android.app.Activity) {
 
     fun addToFavorites(song: Song) {
         if (_favorites.value.any { it.id == song.id }) { _toastMessage.value = "已收藏过此歌曲"; return }
-        // 先落本地：未登录 / 离线也能收藏，重启不丢；登录后 loadFavorites 会把本地新增的补传到服务端
-        _favorites.value = listOf(song) + _favorites.value
-        saveFavoritesCache()
-        if (!_isLoggedIn.value || authToken.isBlank()) {
-            _toastMessage.value = "已收藏（本地）"
-            return
-        }
+        // 云端优先：先带 token 上报服务端，云端成功后本地列表只作缓存镜像；
+        // 失败（未登录 / 断网 / 服务异常）才落本地兜底，登录后 loadFavorites 会把本地新增补传上去。
         viewModelScope.launch(Dispatchers.IO) {
             val ok = runCatching { pushFavoriteToServer(song) }.getOrDefault(false)
             withContext(Dispatchers.Main) {
-                _toastMessage.value = if (ok) "已添加到收藏" else "已收藏（本地），云端同步稍后重试"
+                if (_favorites.value.none { it.id == song.id }) {
+                    _favorites.value = listOf(song) + _favorites.value
+                    saveFavoritesCache()
+                }
+                _toastMessage.value = if (ok) "已收藏" else "已收藏（本地，登录后同步）"
             }
         }
     }
@@ -2474,6 +2572,24 @@ private fun addPlayHistory(song: Song) {
     }
 
     init {
+        // ── 液态玻璃能力门槛（< Android 13 产品层面禁用）─────────────────────────
+        // RuntimeShader/AGSL 仅 API 33+ 可用：低版本启动时把液态玻璃风格 / 玻璃导航栏
+        // 直接回退到兼容组合（Material Design 3 + 经典导航栏），走既有 prefs setter 持久化，
+        // 并通过 toastMessage → AppToast 恢复一次应用内提示（每个进程仅此一次）。
+        if (!liquidGlassSupported) {
+            var fallbackChanged = false
+            if (!md3Style) { md3Style = true; fallbackChanged = true }
+            if (useFloatingNavBar) { useFloatingNavBar = false; fallbackChanged = true }
+            if (navBarLiquidGlass) { navBarLiquidGlass = false; fallbackChanged = true }
+            if (fallbackChanged) {
+                savePreferences()
+                viewModelScope.launch {
+                    // 延迟到闪屏/主界面就绪后再提示，避免被启动画面盖掉
+                    delay(2500)
+                    _toastMessage.value = "当前设备低于 Android 13，已自动切换到兼容风格（Material Design 3）"
+                }
+            }
+        }
         _searchHistory.value = loadHistoryFromFile().toMutableList()
         loadDownloadedSongs()
         loadPlayCounts()
@@ -2924,11 +3040,7 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                 currentTab = 3
                 activeSubPage = null
                 ImportBus.consume()
-                android.widget.Toast.makeText(
-                    importHostCtx,
-                    "登录后会自动打开歌单导入",
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
+                AppToast.show("登录后会自动打开歌单导入")
             } else {
                 currentTab = 3
                 // 从引导页跳过来时，主界面还没完成首次绘制，
@@ -3058,7 +3170,7 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                 val psong = PlaylistSong(id = targetSong.id, name = targetSong.name, artist = targetSong.artist, picUrl = targetSong.picUrl)
                 PlaylistStore.savePlaylist(ctxAtp, pl.copy(songs = pl.songs + psong))
                 showAddToPlaylist = null
-                android.widget.Toast.makeText(ctxAtp, "已加入「" + pl.name + "」", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("已加入「" + pl.name + "」")
             }
         )
     }
@@ -3603,14 +3715,24 @@ fun FullScreenPlayer(
         val bgModel = when {
             stableCover.isNotEmpty() -> stableCover
             backgroundImageUri != null -> backgroundImageUri
-            else -> "https://picsum.photos/1080/1920"
+            else -> null
         }
-        AsyncImage(
-            model = bgModel,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize().blur(30.dp)
-        )
+        if (bgModel != null) {
+            AsyncImage(
+                model = bgModel,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().blur(30.dp)
+            )
+        } else {
+            // 无封面且无自定义背景：用统一封面占位图做模糊底（原为随机网图）
+            Image(
+                painter = painterResource(R.drawable.fallback_cover),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().blur(30.dp)
+            )
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -3748,12 +3870,23 @@ fun FullScreenPlayer(
                                     if (lyrics.times.isNotEmpty()) showLyrics = true
                                 }
                         ) {
-                            AsyncImage(
-                                model = rememberStableCover(currentSong.picUrl).ifEmpty { "https://picsum.photos/800/800" },
-                                contentDescription = "Album Art",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
+                            val coverModel = rememberStableCover(currentSong.picUrl)
+                            if (coverModel.isNotEmpty()) {
+                                AsyncImage(
+                                    model = coverModel,
+                                    contentDescription = "Album Art",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                // 无封面兜底：统一封面占位图（原为随机网图）
+                                Image(
+                                    painter = painterResource(R.drawable.fallback_cover),
+                                    contentDescription = "Album Art",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -4124,7 +4257,7 @@ fun MusicSearchTab(
                 val psong = PlaylistSong(id = targetSong.id, name = targetSong.name, artist = targetSong.artist, picUrl = targetSong.picUrl)
                 PlaylistStore.savePlaylist(ctxAtp, pl.copy(songs = pl.songs + psong))
                 showAddToPlaylist = null
-                android.widget.Toast.makeText(ctxAtp, "已加入「" + pl.name + "」", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("已加入「" + pl.name + "」")
             }
         )
     }
@@ -4823,11 +4956,7 @@ fun SettingsThemeTab(
                     title = "音质切换（开发中）",
                     summary = "标准 / 高品 / 无损，正在开发中",
                     onClick = {
-                        android.widget.Toast.makeText(
-                            ctx,
-                            "音质切换正在开发中，敬请期待 🎧",
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
+                        AppToast.show("音质切换正在开发中，敬请期待 🎧")
                     }
                 )
                 if (showTastePrefs) {
@@ -4840,7 +4969,9 @@ fun SettingsThemeTab(
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text("主题与个性化", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                Text("此风格暂不支持自定义壁纸", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // 液态玻璃风格（md3Style = false）支持自定义壁纸：主界面会绘制自定义背景（isCustomBackgroundEnabled && !md3Style），
+                // 此前误标「暂不支持」，已修正为支持文案
+                Text("支持自定义壁纸与横幅，点击前往设置", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -4865,11 +4996,7 @@ fun SettingsThemeTab(
 
                 val ctx2 = LocalContext.current
                 SettingsGlassCard(modifier = Modifier.padding(horizontal = 16.dp), backdrop = backdrop, onClick = {
-                    android.widget.Toast.makeText(
-                        ctx2,
-                        "音质切换正在开发中，敬请期待 🎧",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
+                    AppToast.show("音质切换正在开发中，敬请期待 🎧")
                 }) {
                     Icon(Icons.Rounded.Equalizer, null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(14.dp))
@@ -5244,9 +5371,7 @@ private fun MusicTasteSettingsSheet(
             FilledTonalButton(
                 onClick = {
                     RecommendPrefs.saveAndInvalidate(ctx, genres, artists)
-                    android.widget.Toast.makeText(
-                        ctx, "已保存，推荐已按新偏好刷新", android.widget.Toast.LENGTH_SHORT
-                    ).show()
+                    AppToast.show("已保存，推荐已按新偏好刷新")
                     onDismiss()
                 },
                 shape = RoundedCornerShape(50),
@@ -5604,14 +5729,25 @@ private fun FloatingLyricsSettingsSheet(
                 }
 
                 KsuSegTitle("文字颜色")
-                swatchRow(textColorOptions, textColor) { i ->
-                    textColor = textColorOptions[i].toArgb()
-                    FloatingLyricsPrefs.setTextColor(ctx, textColor)
-                    // 选了文字颜色就关掉「当前行跟随动态色」，否则主行被强调色覆盖，看起来像「改了没反应」
-                    useAccent = false
-                    FloatingLyricsPrefs.setUseAccentForCurrent(ctx, false)
-                    FloatingLyricsService.applyNow(ctx)
-                }
+                var lyricColorIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricColorIndex(ctx)) }
+                run {                 Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("粉色" to 0, "蓝色" to 1).forEach { (nm, idx) ->
+                        val on = lyricColorIndexState == idx
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable {
+                                    FloatingLyricsPrefs.setLyricColorIndex(ctx, idx); lyricColorIndexState = idx
+                                    FloatingLyricsPrefs.setLyricColorIndex(ctx, idx)
+                                    FloatingLyricsService.applyNow(ctx)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 7.dp)
+                        ) {
+                            Text(nm, fontSize = 13.sp, color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                } }
                 Text(
                     "底色会按文字色自动保证对比度：选白字自动压深底色，任何配色都看得清",
                     fontSize = 11.sp,
@@ -5619,11 +5755,66 @@ private fun FloatingLyricsSettingsSheet(
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
 
+                KsuSegTitle("自定义文字颜色")
+                Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        0xFFFFFFFF.toInt() to "白", 0xFF000000.toInt() to "黑",
+                        0xFFFFD54F.toInt() to "黄", 0xFF64B5F6.toInt() to "蓝",
+                        0xFF81C784.toInt() to "绿", 0xFFFF8A80.toInt() to "红",
+                        0xFFFF69B4.toInt() to "粉", 0xFFB39DDB.toInt() to "紫"
+                    ).forEach { (argb, _) ->
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(argb))
+                                .clickable {
+                                    FloatingLyricsPrefs.setTextColor(ctx, argb)
+                                    FloatingLyricsPrefs.setUseAccentForCurrent(ctx, false)
+                                    FloatingLyricsService.applyNow(ctx)
+                                }
+                        )
+                    }
+                }
+
                 KsuSegTitle("背景颜色")
-                swatchRow(bgColorOptions, bgColor) { i ->
-                    bgColor = bgColorOptions[i].toArgb()
-                    FloatingLyricsPrefs.setBgColor(ctx, bgColor)
-                    FloatingLyricsService.applyNow(ctx)
+                var lyricBgIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricBgIndex(ctx)) }
+                run {                 Row(modifier = Modifier.padding(horizontal = 16.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("深色" to 0, "白色" to 1, "雫蓝" to 2, "芙兰" to 3, "绒灰蓝" to 4, "薰衣草紫" to 5, "透明" to 6).forEach { (nm, idx) ->
+                        val on = lyricBgIndexState == idx
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable {
+                                    FloatingLyricsPrefs.setLyricBgIndex(ctx, idx); lyricBgIndexState = idx
+                                    FloatingLyricsPrefs.setLyricBgIndex(ctx, idx)
+                                    FloatingLyricsService.applyNow(ctx)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 7.dp)
+                        ) {
+                            Text(nm, fontSize = 13.sp, color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                } }
+
+                KsuSegTitle("自定义背景颜色")
+                Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        0xFFFFFFFF.toInt(), 0xFF000000.toInt(), 0xFF424242.toInt(), 0xFF1A237E.toInt(),
+                        0xFF4A148C.toInt(), 0xFFBF360C.toInt(), 0xFFF5F9FF.toInt(), 0xFF1B1B1F.toInt()
+                    ).forEach { argb ->
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(argb))
+                                .clickable {
+                                    FloatingLyricsPrefs.setBgColor(ctx, argb)
+                                    FloatingLyricsService.applyNow(ctx)
+                                }
+                        )
+                    }
                 }
 
                 KsuSegColumn(title = "卡片外观") {
@@ -5766,14 +5957,25 @@ private fun FloatingLyricsSettingsSheet(
                 }
 
                 KsuSegTitle("文字颜色")
-                swatchRow(textColorOptions, textColor) { i ->
-                    textColor = textColorOptions[i].toArgb()
-                    FloatingLyricsPrefs.setTextColor(ctx, textColor)
-                    // 选了文字颜色就关掉「当前行跟随动态色」，否则主行被强调色覆盖，看起来像「改了没反应」
-                    useAccent = false
-                    FloatingLyricsPrefs.setUseAccentForCurrent(ctx, false)
-                    FloatingLyricsService.applyNow(ctx)
-                }
+                var lyricColorIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricColorIndex(ctx)) }
+                run {                 Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("粉色" to 0, "蓝色" to 1).forEach { (nm, idx) ->
+                        val on = lyricColorIndexState == idx
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable {
+                                    FloatingLyricsPrefs.setLyricColorIndex(ctx, idx); lyricColorIndexState = idx
+                                    FloatingLyricsPrefs.setLyricColorIndex(ctx, idx)
+                                    FloatingLyricsService.applyNow(ctx)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 7.dp)
+                        ) {
+                            Text(nm, fontSize = 13.sp, color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                } }
                 Text(
                     "底色会按文字色自动保证对比度：选白字自动压深底色，任何配色都看得清",
                     fontSize = 11.sp,
@@ -5781,12 +5983,48 @@ private fun FloatingLyricsSettingsSheet(
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
 
-                KsuSegTitle("背景颜色")
-                swatchRow(bgColorOptions, bgColor) { i ->
-                    bgColor = bgColorOptions[i].toArgb()
-                    FloatingLyricsPrefs.setBgColor(ctx, bgColor)
-                    FloatingLyricsService.applyNow(ctx)
+                KsuSegTitle("自定义文字颜色")
+                Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        0xFFFFFFFF.toInt() to "白", 0xFF000000.toInt() to "黑",
+                        0xFFFFD54F.toInt() to "黄", 0xFF64B5F6.toInt() to "蓝",
+                        0xFF81C784.toInt() to "绿", 0xFFFF8A80.toInt() to "红",
+                        0xFFFF69B4.toInt() to "粉", 0xFFB39DDB.toInt() to "紫"
+                    ).forEach { (argb, _) ->
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(argb))
+                                .clickable {
+                                    FloatingLyricsPrefs.setTextColor(ctx, argb)
+                                    FloatingLyricsPrefs.setUseAccentForCurrent(ctx, false)
+                                    FloatingLyricsService.applyNow(ctx)
+                                }
+                        )
+                    }
                 }
+
+                KsuSegTitle("背景颜色")
+                var lyricBgIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricBgIndex(ctx)) }
+                run {                 Row(modifier = Modifier.padding(horizontal = 16.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("深色" to 0, "白色" to 1, "雫蓝" to 2, "芙兰" to 3, "绒灰蓝" to 4, "薰衣草紫" to 5, "透明" to 6).forEach { (nm, idx) ->
+                        val on = lyricBgIndexState == idx
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable {
+                                    FloatingLyricsPrefs.setLyricBgIndex(ctx, idx); lyricBgIndexState = idx
+                                    FloatingLyricsPrefs.setLyricBgIndex(ctx, idx)
+                                    FloatingLyricsService.applyNow(ctx)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 7.dp)
+                        ) {
+                            Text(nm, fontSize = 13.sp, color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                } }
 
                 SettingsGlassCard(
                     modifier = Modifier.padding(horizontal = 16.dp),
@@ -6178,6 +6416,7 @@ fun NavigationBarSettingsScreen(
                             }
                             Switch(
                                 checked = viewModel.useFloatingNavBar,
+                                enabled = liquidGlassSupported,
                                 onCheckedChange = {
                                                                         viewModel.useFloatingNavBar = it
                                     viewModel.md3Style = !it
@@ -6194,7 +6433,11 @@ fun NavigationBarSettingsScreen(
                             )
                         }
                         Spacer(modifier = Modifier.height(2.dp))
-                        Text("关闭后使用 MD3 经典底部导航栏（Material Design 3）", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                        Text(
+                            if (liquidGlassSupported) "关闭后使用 MD3 经典底部导航栏（Material Design 3）"
+                            else "液态玻璃导航栏$LIQUID_GLASS_REQUIRE_TEXT，当前设备已回退经典导航栏",
+                            fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
                     }
                 }
 
@@ -6216,6 +6459,7 @@ fun NavigationBarSettingsScreen(
                             }
                             Switch(
                                 checked = viewModel.navBarLiquidGlass,
+                                enabled = liquidGlassSupported,
                                 onCheckedChange = {
                                     viewModel.navBarLiquidGlass = it
                                     viewModel.savePreferences()
@@ -6231,7 +6475,11 @@ fun NavigationBarSettingsScreen(
                             )
                         }
                         Spacer(modifier = Modifier.height(2.dp))
-                        Text("半透明毛玻璃导航栏效果", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                        Text(
+                            if (liquidGlassSupported) "半透明毛玻璃导航栏效果"
+                            else "玻璃模糊$LIQUID_GLASS_REQUIRE_TEXT，不可开启",
+                            fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
                     }
                 }
 
@@ -6418,13 +6666,14 @@ fun NavigationBarSettingsScreen(
 
                 Button(
                     onClick = {
-                        viewModel.useFloatingNavBar = true
-                        viewModel.navBarLiquidGlass = true
+                        // 低版本不支持液态玻璃（RuntimeShader/AGSL）：恢复默认也不能把玻璃导航栏打开
+                        viewModel.useFloatingNavBar = liquidGlassSupported
+                        viewModel.navBarLiquidGlass = liquidGlassSupported
                         viewModel.navBarShowLabels = true
                         viewModel.navBarOffsetX = 0f
                         viewModel.navBarOffsetY = -20f
                         viewModel.savePreferences()
-                        android.widget.Toast.makeText(context, "已重置导航栏设置", android.widget.Toast.LENGTH_SHORT).show()
+                        AppToast.show("已重置导航栏设置")
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(25.dp)
@@ -6483,9 +6732,9 @@ fun ThemeAndPersonalizationScreen(
                 }
                 viewModel.bannerImageUri = it
                 viewModel.savePreferences()
-                android.widget.Toast.makeText(context, "横幅已更新", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("横幅已更新")
             } catch (_: Exception) {
-                android.widget.Toast.makeText(context, "横幅保存失败", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("横幅保存失败")
             }
         }
     }
@@ -6503,9 +6752,9 @@ fun ThemeAndPersonalizationScreen(
                 viewModel.customBackgroundUri = it
                 viewModel.backgroundImageUri = it
                 viewModel.savePreferences()
-                android.widget.Toast.makeText(context, "背景已更新", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("背景已更新")
             } catch (_: Exception) {
-                android.widget.Toast.makeText(context, "背景保存失败", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("背景保存失败")
             }
         }
     }
@@ -6962,7 +7211,7 @@ fun ThemeAndPersonalizationScreen(
                                             viewModel.backgroundBiasX = 0f
                                             viewModel.backgroundBiasY = 0f
                                             viewModel.savePreferences()
-                                            android.widget.Toast.makeText(context, "已移除自定义背景", android.widget.Toast.LENGTH_SHORT).show()
+                                            AppToast.show("已移除自定义背景")
                                         },
                                         modifier = Modifier.weight(1f).height(40.dp).bounceClick(shape = RoundedCornerShape(50)),
                                         shape = RoundedCornerShape(50),
@@ -7173,14 +7422,27 @@ fun SongLongPressSheet(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                AsyncImage(
-                    model = song.picUrl.ifEmpty { "https://picsum.photos/400/400" },
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
+                Box(
                     modifier = Modifier
                         .size(72.dp)
                         .clip(RoundedCornerShape(14.dp))
-                )
+                ) {
+                    // 无封面兜底：统一封面占位图铺满（原为随机网图）
+                    Image(
+                        painter = painterResource(R.drawable.fallback_cover),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    if (song.picUrl.isNotEmpty()) {
+                        AsyncImage(
+                            model = song.picUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
                 Spacer(Modifier.height(16.dp))
                 Text(
                     song.name,
@@ -7456,11 +7718,11 @@ fun SongItem(
                 ) {
                     // Fallback layer: stays visible when the cover fails to load
                     // (Coil draws nothing on error), so the tile is never blank.
-                    Icon(
-                        imageVector = Icons.Rounded.MusicNote,
-                        null,
-                        tint = iconTint,
-                        modifier = Modifier.size(26.dp)
+                    Image(
+                        painter = painterResource(R.drawable.fallback_cover),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
                     )
                     if (song.picUrl.isNotEmpty()) {
                         AsyncImage(
@@ -7546,7 +7808,7 @@ fun SongItem(
                 val ps = PlaylistSong(id = song.id, name = song.name, artist = song.artist, picUrl = song.picUrl)
                 PlaylistStore.savePlaylist(ctxA, pl.copy(songs = pl.songs + ps))
                 showAddSheet = false
-                android.widget.Toast.makeText(ctxA, "已加入歌单", android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show("已加入歌单")
             }
         )
     }
@@ -7727,7 +7989,13 @@ fun MD3StyleBottomSheetConsole(
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
-                        Icon(Icons.Rounded.MusicNote, null, tint = MaterialTheme.colorScheme.primary)
+                        // 无封面兜底：统一封面占位图铺满（原为 MusicNote 图标）
+                        Image(
+                            painter = painterResource(R.drawable.fallback_cover),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
                 }
                 Spacer(modifier = Modifier.width(12.dp))
@@ -8353,6 +8621,16 @@ fun Modifier.md3OrGlassBackdrop(
     }
 
 class MainActivity : ComponentActivity() {
+    override fun attachBaseContext(newBase: Context) {
+        val conf = Configuration(newBase.resources.configuration)
+        conf.fontScale = 1.0f                       // 忽略系统字体缩放，软件始终保持原大小
+        val prefs = newBase.getSharedPreferences("app_display", Context.MODE_PRIVATE)
+        val frozenDpi = prefs.getInt("density_dpi", -1)
+        if (frozenDpi > 0) conf.densityDpi = frozenDpi  // 冻结显示密度（首次启动时由 App 捕获）
+        applyOverrideConfiguration(conf)
+        super.attachBaseContext(newBase)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (FloatingLyricsPrefs.isEnabled(this)) FloatingLyricsService.start(this)
@@ -8460,8 +8738,15 @@ class MainActivity : ComponentActivity() {
         // 引导 UI 在启动闪屏里（logs.kt 的 GuideScreen），拿不到 ViewModel，所以从这里注入回调。
         LaunchedEffect(Unit) {
             GuideStyleBridge.apply = { liquid, keyColor, finish ->
-                viewModel.md3Style = !liquid
-                if (liquid) viewModel.useFloatingNavBar = true
+                // 液态玻璃风格依赖 RuntimeShader/AGSL（API 33+）：低版本强制回退兼容风格
+                val liquidAllowed = liquid && liquidGlassSupported
+                viewModel.md3Style = !liquidAllowed
+                if (liquidAllowed) viewModel.useFloatingNavBar = true
+                else if (!liquidGlassSupported) {
+                    // 低版本：玻璃导航栏一并禁用并持久化
+                    viewModel.useFloatingNavBar = false
+                    viewModel.navBarLiquidGlass = false
+                }
                 viewModel.keyColor = keyColor
                 viewModel.savePreferences()
                 if (finish) {
@@ -8474,8 +8759,16 @@ class MainActivity : ComponentActivity() {
 
         // 风格页收尾（onSelect / 「稍后我再看」共用）：应用风格 + 标记已看过 + 通知推荐页
         val finishStyleGuide: (Boolean) -> Unit = { liquid ->
-            viewModel.md3Style = !liquid
-            viewModel.useFloatingNavBar = true
+            // 液态玻璃风格依赖 RuntimeShader/AGSL（API 33+）：低版本强制回退兼容风格
+            val liquidAllowed = liquid && liquidGlassSupported
+            viewModel.md3Style = !liquidAllowed
+            if (liquidAllowed) {
+                viewModel.useFloatingNavBar = true
+            } else if (!liquidGlassSupported) {
+                // 低版本：玻璃导航栏一并禁用并持久化
+                viewModel.useFloatingNavBar = false
+                viewModel.navBarLiquidGlass = false
+            }
             viewModel.savePreferences()
             appPrefs.edit().putBoolean("style_guide_shown", true).apply()
             OnboardingState.refresh(context)
@@ -8555,13 +8848,15 @@ class MainActivity : ComponentActivity() {
             }
 
 
+            // 应用内气泡提示：不再用系统 Toast，文案与语义保持不变
             val toastMessage by viewModel.toastMessage.collectAsState()
             LaunchedEffect(toastMessage) {
                 toastMessage?.let { msg ->
-                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
+                    AppToast.show(msg, long = true)
                     viewModel.clearToast()
                 }
             }
+            InAppToastHost()
 
             // 公告/更新的「何时弹」由下面两个 LaunchedEffect 用 onboardingDone 把关，
             // 所以这里只负责尽早把数据拉回来 —— 不要再等 onboardingDone：
@@ -8825,21 +9120,13 @@ class MainActivity : ComponentActivity() {
                                                         intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                                         startActivity(intent)
                                                     } catch (e: Exception) {
-                                                        android.widget.Toast.makeText(
-                                                            this@MainActivity,
-                                                            "安装失败",
-                                                            android.widget.Toast.LENGTH_SHORT
-                                                        ).show()
+                                                        AppToast.show("安装失败")
                                                     }
                                                 }
                                             } catch (e: Exception) {
                                                 withContext(Dispatchers.Main) {
                                                     isDownloading = false
-                                                    android.widget.Toast.makeText(
-                                                        this@MainActivity,
-                                                        "下载失败",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
+                                                    AppToast.show("下载失败")
                                                 }
                                             }
                                     }
