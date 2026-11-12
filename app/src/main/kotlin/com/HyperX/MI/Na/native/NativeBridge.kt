@@ -62,6 +62,9 @@ object NativeBridge {
     private val onceFilter = Once("filterSongs")
     private val onceJunk = Once("junkFlags")
     private val onceDedup = Once("dedupKey")
+    private val onceMerge = Once("mergeDedup")
+    private val onceVTag = Once("parseVersionTag")
+    private val onceLrcFull = Once("parseLrcFull")
 
     // ── JNI 原型（object 上的 external fun 编译为单例实例方法，JNI 侧以 jobject 接收）──
     // 请勿在兜底检查之外直接调用，一律走下方包装方法。
@@ -100,6 +103,23 @@ object NativeBridge {
 
     /** 搜索结果去重键：`(name + "|" + artist).lowercase() + "|" + parseVersionTag(name, album)`。 */
     external fun nativeDedupKey(name: String, artist: String, album: String): String
+
+    /**
+     * 搜索合并批量去重：按 dedupKey **首现胜出**，返回逐行「是否保留」。
+     * 行顺序 = 调用方收集顺序（源顺序 → 源内顺序），与原逐条 containsKey+put 同序。
+     */
+    external fun nativeMergeDedup(
+        names: Array<String>, artists: Array<String>, albums: Array<String>
+    ): BooleanArray
+
+    /** 版本 tag（"" = 无版本修饰）；与 DiscoverScreen.parseVersionTag 逐字一致。 */
+    external fun nativeParseVersionTag(name: String, album: String): String
+
+    /**
+     * LRC 全量解析：返回 `Array<Any>`，[0]=`Array<String>` 歌词文本（按时间稳定排序）、
+     * [1]=`IntArray` 对应毫秒时间戳 —— 调用方零逐条解析。
+     */
+    external fun nativeParseLrcFull(lrc: String): Array<Any>
 
     // ── 安全包装（调用点使用这些）───────────────────────────────────────────
 
@@ -191,6 +211,58 @@ object NativeBridge {
             val r = nativeDedupKey(name, artist, album)
             onceDedup.fire()
             r
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * 搜索合并批量去重。null = native 不可用/失败/数组不等长，
+     * 调用点走原 Kotlin 逐条 containsKey+put，行为一致。
+     */
+    fun mergeDedup(
+        names: Array<String>, artists: Array<String>, albums: Array<String>
+    ): BooleanArray? {
+        if (!loaded || names.size != artists.size || names.size != albums.size) return null
+        return try {
+            val r = nativeMergeDedup(names, artists, albums)
+            if (r.size != names.size) return null
+            onceMerge.fire()
+            r
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * 版本 tag。**null = native 不可用/失败**（调用点走 Kotlin parseVersionTag）；
+     * 非 null（含空串）= 结果本身，空串表示「无版本修饰」。
+     */
+    fun parseVersionTagN(name: String, album: String): String? {
+        if (!loaded) return null
+        return try {
+            val r = nativeParseVersionTag(name, album)
+            onceVTag.fire()
+            r
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * LRC 全量解析。null = native 不可用/失败/结构不符，调用点走原
+     * parseLrc + entryTime / 纯 Kotlin feed 路径。
+     */
+    fun parseLrcFull(lrc: String): Pair<Array<String>, IntArray>? {
+        if (!loaded) return null
+        return try {
+            val r = nativeParseLrcFull(lrc)
+            @Suppress("UNCHECKED_CAST")
+            val texts = r[0] as? Array<String> ?: return null
+            val tms = r[1] as? IntArray ?: return null
+            if (texts.size != tms.size) return null
+            onceLrcFull.fire()
+            texts to tms
         } catch (_: Throwable) {
             null
         }

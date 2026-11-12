@@ -352,7 +352,7 @@ class MusicApiService {
 
     suspend fun search(
             keyword: String,
-            sources: List<String> = listOf("netease"),
+            sources: List<String> = listOf("netease", "kuwo", "migu", "qq", "qianqian", "kugou", "bilibili"),  // 聚合搜索：七源并发，平台越多越好；免费源兜底
         ): Result<List<Song>> = withContext(Dispatchers.IO) {
         // 10 分钟内同关键词走缓存，避免重复请求造成限流假死
         val cacheKey = keyword + "#" + sources.hashCode()
@@ -363,8 +363,7 @@ class MusicApiService {
         // 四个音源并行请求：串行时单个音源卡住会叠加成数十秒，
         // 正是「偶尔搜不到 / 推荐加载不出来」的根因；并行后总耗时约等于最慢的那个源。
         suspend fun fetchMerged(sources: List<String>): List<Song> = runCatching {
-            val merged = java.util.Collections.synchronizedMap(LinkedHashMap<String, Song>())
-            kotlinx.coroutines.coroutineScope {
+            val mergedList: List<Song> = kotlinx.coroutines.coroutineScope {
                 // 必须把「源名」和它的请求结果绑在一起 await：否则拿不到 srcName，
                 // 无法把歌曲标记成它真正所属的平台（→ 歌词/播放会串源）。
                 val jobs = sources.map { srcName ->
@@ -380,21 +379,36 @@ class MusicApiService {
                         }.orEmpty()
                     }
                 }
+                // 先按原顺序收集（源顺序 → 源内顺序，与原逐条合并完全同序），
+                // 再由 native 一次性「算键 + 首现胜出」批量去重（键计算 + 判重都在 C++）：
+                // null = 不可用/失败 → 走下方原 Kotlin 逐条路径，行为一致。
+                val collected = ArrayList<Song>()
                 jobs.forEach { (srcName, job) ->
                     job.await().forEach { ps ->
-                        // 去重键必须带版本标识：否则同一首歌的「原唱 / DJ版 / Live / 翻唱 / 伴奏」
-                        // 会被合并成一条，先到的版本胜出（免 Cookie 源排在前面，DJ 版常常先到）
-                        // →「搜不到原唱」「收藏的原唱点进去变成 DJ 版」。
-                        // native 热点路径：key 计算下沉 libminova.so（与原表达式逐字一致）；
-                        // null = 不可用/失败 → 原表达式兜底，行为一致。
-                        val key = NativeBridge.dedupKey(ps.name, ps.artist, ps.album)
-                            ?: ((ps.name + "|" + ps.artist).lowercase() +
-                                "|" + (parseVersionTag(ps.name, ps.album) ?: ""))
-                        if (!merged.containsKey(key)) {
-                            merged[key] = Song(id = ps.id, name = ps.name, artist = ps.artist,
-                                album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
-                                source = ps.source.ifBlank { srcName })
+                        collected.add(Song(id = ps.id, name = ps.name, artist = ps.artist,
+                            album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
+                            source = ps.source.ifBlank { srcName }))
+                    }
+                }
+                // native 批量去重（键计算 + 首现胜出都在 C++）；结果作为 coroutineScope 返回值
+                run {
+                    val keeps = if (collected.isEmpty()) null else NativeBridge.mergeDedup(
+                        Array(collected.size) { collected[it].name },
+                        Array(collected.size) { collected[it].artist },
+                        Array(collected.size) { collected[it].album }
+                    )
+                    if (keeps != null && keeps.size == collected.size) {
+                        collected.filterIndexed { i, _ -> keeps[i] }
+                    } else {
+                        // 原逐条路径：键 = 歌名|歌手 + 版本 tag，首现胜出
+                        // （去重键必须带版本标识：否则「原唱/DJ版/Live/翻唱/伴奏」被合并成一条）
+                        val m = LinkedHashMap<String, Song>()
+                        collected.forEach { ps ->
+                            val key = (ps.name + "|" + ps.artist).lowercase() +
+                                "|" + (parseVersionTag(ps.name, ps.album) ?: "")
+                            if (!m.containsKey(key)) m[key] = ps
                         }
+                        m.values.toList()
                     }
                 }
             }
@@ -402,7 +416,7 @@ class MusicApiService {
             // 这里不再做「原唱优先」重排 —— sortSearchResults / isJunkVersion 保留但已不参与展示。
             // native 热点路径：批量过滤下沉 libminova.so（与 isLikelyMusic 逐字一致），
             // 不可用时函数内部走原 Kotlin 逐条过滤，行为一致。
-            filterLikelyMusicList(merged.values.toList())
+            filterLikelyMusicList(mergedList)
         }.getOrNull().orEmpty()
 
         // 全空时自动重试一次：上游偶发抽风（限流/超时）时第二次往往就正常。
@@ -411,7 +425,7 @@ class MusicApiService {
         // 点击播放时再由 resolveNextPlayUrl 去其他平台严格匹配同一首歌（快 CDN 优先）。
         var free = fetchMerged(sources)
         if (free.isEmpty()) {
-            free = fetchMerged(listOf("kuwo", "migu", "qianqian", "bilibili", "qq"))
+            free = fetchMerged(listOf("kuwo", "migu", "qq"))  // 网易拿不到的（VIP/版权）回退免费平台找同曲
         }
         if (free.isEmpty()) {
             kotlinx.coroutines.delay(700L)
@@ -469,9 +483,11 @@ class MusicApiService {
      */
     suspend fun searchPage(keyword: String, page: Int): List<Song> = withContext(Dispatchers.IO) {
         if (keyword.isBlank() || page < 2) return@withContext emptyList()
-        val sources = listOf("netease")
-        val merged = java.util.Collections.synchronizedMap(LinkedHashMap<String, Song>())
-        kotlinx.coroutines.coroutineScope {
+        val sources = listOf("netease", "kuwo", "migu", "qq", "qianqian", "kugou", "bilibili")  // 翻页同主搜索源（七源聚合）
+        // 与 search() 同一套去重键（带版本标识），保证两个入口的口径一致。
+        // native 热点路径：先按源顺序收集，再由 native 一次性「算键 + 首现胜出」；
+        // null = 不可用/失败 → 原 Kotlin 逐条路径，行为一致。
+        val mergedList: List<Song> = kotlinx.coroutines.coroutineScope {
             val jobs = sources.map { srcName ->
                 srcName to async(Dispatchers.IO) {
                     kotlinx.coroutines.withTimeoutOrNull(8_000) {
@@ -481,22 +497,32 @@ class MusicApiService {
                     }.orEmpty()
                 }
             }
+            val collected = ArrayList<Song>()
             jobs.forEach { (srcName, job) ->
                 job.await().forEach { ps ->
-                    // 与 search() 同一套去重键（带版本标识），保证两个入口的口径一致
-                    // native 热点路径：null = 不可用/失败 → 原表达式兜底。
-                    val key = NativeBridge.dedupKey(ps.name, ps.artist, ps.album)
-                        ?: ((ps.name + "|" + ps.artist).lowercase() +
-                            "|" + (parseVersionTag(ps.name, ps.album) ?: ""))
-                    if (!merged.containsKey(key)) {
-                        merged[key] = Song(id = ps.id, name = ps.name, artist = ps.artist,
-                            album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
-                            source = ps.source.ifBlank { srcName })
-                    }
+                    collected.add(Song(id = ps.id, name = ps.name, artist = ps.artist,
+                        album = ps.album, duration = ps.duration, picUrl = ps.picUrl,
+                        source = ps.source.ifBlank { srcName }))
                 }
             }
+            val keeps = if (collected.isEmpty()) null else NativeBridge.mergeDedup(
+                Array(collected.size) { collected[it].name },
+                Array(collected.size) { collected[it].artist },
+                Array(collected.size) { collected[it].album }
+            )
+            if (keeps != null && keeps.size == collected.size) {
+                collected.filterIndexed { i, _ -> keeps[i] }
+            } else {
+                val m = LinkedHashMap<String, Song>()
+                collected.forEach { ps ->
+                    val key = (ps.name + "|" + ps.artist).lowercase() +
+                        "|" + (parseVersionTag(ps.name, ps.album) ?: "")
+                    if (!m.containsKey(key)) m[key] = ps
+                }
+                m.values.toList()
+            }
         }
-        merged.values.toList()
+        mergedList
     }
 
     private fun fetchCovers(ids: String): Map<Long, String> {
@@ -620,7 +646,34 @@ class MusicApiService {
             }
         }
 
-        // ── native 热点路径（libminova.so，可选）────────────────────────────
+        // ── native 全量路径（优先，libminova.so）：C++ 直接返回
+        //    [文本数组（按时间稳定排序）, 毫秒时间戳数组]，解析/排序/格式化全部在
+        //    native 完成，Kotlin 侧零逐条解析（消灭 entryTime 热循环）。
+        //    null = 不可用/失败 → 走下方原路径（nativeParseLrc+entryTime / 纯 Kotlin feed）。
+        val nFull = NativeBridge.parseLrcFull(lrcText)
+        if (nFull != null) {
+            val (texts, tms) = nFull
+            for (k in texts.indices) {
+                val t = tms[k].toLong(); val text = texts[k]
+                val list = candidates.getOrPut(t) { mutableListOf() }
+                if (!list.contains(text)) list.add(text)
+                if (!times.contains(t)) times.add(t)
+            }
+            // 翻译行不进 times（与 feed(it, collectTimes=false) 一致）：
+            // 择优时只挂在 lrc 已有时间戳上，多出的翻译时间戳会被丢弃。
+            val nTFull = NativeBridge.parseLrcFull(tlyricText)
+            if (nTFull != null) {
+                val (ttexts, ttms) = nTFull
+                for (k in ttexts.indices) {
+                    val t = ttms[k].toLong(); val text = ttexts[k]
+                    val list = candidates.getOrPut(t) { mutableListOf() }
+                    if (!list.contains(text)) list.add(text)
+                }
+            } else {
+                tlyricText.lines().forEach { feed(it, false) }
+            }
+        } else {
+        // ── 原路径（兜底，逐字保留）────────────────────────────────────────
         // C++ 侧与 feed() 语义逐条一致：同一时间戳多份文本按出现顺序收集、
         // 逐字时间戳/增强型 LRC 只取首标签、空文本与 "//" 跳过、trim 对齐
         // Character.isWhitespace。输出按时间稳定排序的 "mm:ss.xx\t文本"。
@@ -664,6 +717,7 @@ class MusicApiService {
             lrcText.lines().forEach { feed(it, true) }
             tlyricText.lines().forEach { feed(it, false) }
         }
+        }  // end: parseLrcFull 不可用时的原路径分支
         times.sort()
 
         // ── 择优：原文优先（假名/谚文 > 汉字 > 其它）──
@@ -850,6 +904,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var playFailStreak = 0
     /** 当前这首歌是否已用过网易云 outer 兜底（只允许一次，避免 onError 死循环） */
     private var neteaseFallbackTried = false
+    /** 当前这首歌是否已做过一次「静默重解」：onError 重解每首歌只允许一次，再错就切下一首 */
+    private var errorRetryDone = false
 
     /**
      * 兜底播放队列：推荐页各分区点歌时没有显式传队列，
@@ -1457,6 +1513,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             .build()
                     )
                     setOnPreparedListener { mp ->
+                        preparedFlag = true
+                        prepareWatchdogJob?.cancel()
                         applyPendingSeek(mp)
                         android.util.Log.i(
                             "MINova-Play",
@@ -1490,6 +1548,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     setDataSource(url)
                     prepareAsync()
+                    // 歌单直链同样可能永不 prepared（死链/风控空流）→ 挂 prepare 看门狗
+                    preparedFlag = false
+                    startPrepareWatchdog()
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 切歌时上个协程被取消属正常流程，不能当播放失败提示
@@ -1520,6 +1581,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     /** 最近一次成功解析实际命中的源（日志用；区别于 song.source） */
     private var lastResolvedSource: String = ""
+
+    // ── 起播候选轮换（起播 5 秒内 onError = 候选 URL 秒死 → 换下一个候选，不再「重解→秒死→切歌」）──
+    /** 本次播放的候选列表（[MusicApiClient.resolvePlayCandidates] 已排序：自身源 + 严格轮 + 版本轮） */
+    private var playCandidates: List<PlayCandidate> = emptyList()
+    /** 当前生效的候选下标（onError 轮换时推进） */
+    private var playCandidateIdx = 0
+    /** 本次播放已轮换的候选次数（上限 3） */
+    private var rotationAttempts = 0
+    /** 本次播放真正出声的时间戳；0 = 尚未出声（prepare 阶段就报错也按「秒死」轮换处理） */
+    private var audioStartedAt = 0L
 
     /** 预缓冲用的临时播放器：只 prepare 不 start，把 DNS/TLS/CDN 连接与首段缓冲先热起来。 */
     private var warmUpPlayer: MediaPlayer? = null
@@ -1603,7 +1674,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
             val u = url
             if (!u.isNullOrBlank() && u.startsWith("http")) {
-                if (prefetchedPlays.size > 6) prefetchedPlays.clear()
+                if (prefetchedPlays.size > 12) prefetchedPlays.clear()
                 prefetchedPlays[key] = PrefetchedPlay(u, src, System.currentTimeMillis())
                 android.util.Log.i(
                     "MINova-Play",
@@ -1643,6 +1714,38 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 setDataSource(url)
                 prepareAsync()
+            }
+        }
+    }
+
+    /**
+     * 列表预解析（杀手锏）：搜索/推荐结果**渲染时**后台并发预解析前 5 首的直链，
+     * 结果进 [prefetchedPlays] 缓存 —— 用户点任何一首可见歌 0~1s 起播（缓存命中）。
+     * 每首歌走 [MusicApiClient.resolveFastUrl]（自身源快 CDN 直取 1 请求为主力，无搜索风暴）。
+     */
+    fun prefetchSongs(songs: List<Song>) {
+        val targets = songs.asSequence()
+            .filter { it.id.isNotBlank() }
+            .distinctBy { prefetchKey(it) }
+            .filter { prefetchedPlays[prefetchKey(it)] == null }
+            .take(5)
+            .toList()
+        if (targets.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.coroutineScope {
+                targets.forEach { song ->
+                    launch {
+                        val fr = runCatching {
+                            MusicApiClient.resolveFastUrl(song.id, song.name, song.artist, song.source, song.duration)
+                        }.getOrNull()
+                        val u = fr?.play?.url
+                        if (!u.isNullOrBlank() && u.startsWith("http")) {
+                            if (prefetchedPlays.size > 12) prefetchedPlays.clear()
+                            prefetchedPlays[prefetchKey(song)] = PrefetchedPlay(u, fr.play.source, System.currentTimeMillis())
+                            android.util.Log.i("MINova-Play", "prefetched(list) src=" + fr.play.source + " song=" + song.name)
+                        }
+                    }
+                }
             }
         }
     }
@@ -1707,12 +1810,99 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         return null
     }
 
+    // ── 死链/风控空流看门狗：URL 能连但永不缓冲完成时 onPrepared/onError 都不会来，必须主动掐断 ──
+    /** onPrepared 一进来就置 true：区分「prepare 永不完成」（死链）与正常缓冲 */
+    @Volatile private var preparedFlag = false
+    /** prepare 看门狗：prepareAsync 后 10 秒仍未 prepared 且没出声 → 视为死链，切下一首 */
+    private var prepareWatchdogJob: kotlinx.coroutines.Job? = null
+    /** 缓冲看门狗：BUFFERING_START 后 15 秒仍没 END 且没出声 → 切下一首 */
+    private var bufferWatchdogJob: kotlinx.coroutines.Job? = null
+
+    /** 新歌开始/播放停止时取消两个看门狗，避免旧看门狗误伤下一首 */
+    private fun cancelPlaybackWatchdogs() {
+        prepareWatchdogJob?.cancel(); prepareWatchdogJob = null
+        bufferWatchdogJob?.cancel(); bufferWatchdogJob = null
+    }
+
+    /** prepare 看门狗：10 秒后仍未 prepared 且没在播 → 视为死链/风控空流，自动切下一首 */
+    private fun startPrepareWatchdog() {
+        val startedFor = _currentSong.value?.id
+        prepareWatchdogJob?.cancel()
+        prepareWatchdogJob = viewModelScope.launch {
+            delay(10_000L)
+            if (_currentSong.value?.id != startedFor || preparedFlag) return@launch
+            val mp = mediaPlayer
+            if (mp != null && runCatching { mp.isPlaying }.getOrDefault(false)) return@launch
+            android.util.Log.w("MINova-Play", "prepare watchdog: 10s no onPrepared, dead link, skip song=$startedFor")
+            // 切歌动作丢到主线程消息队列执行：不从看门狗协程栈里直接调 playSong
+            // （在协程栈内同步 playSong 会让新 playJob 起不来，实测表现为「看门狗触发但下一首永远不开始」）
+            android.os.Handler(android.os.Looper.getMainLooper()).post { skipToNextOnWatchdog("prepare", startedFor) }
+        }
+    }
+
+    /** 看门狗判死后的统一切歌动作：复用 playFailStreak 上限（连续 ≥3 停止自动跳过） */
+    private fun skipToNextOnWatchdog(reason: String, songId: String?) {
+        if (_currentSong.value?.id != songId) return
+        val mp = mediaPlayer
+        if (mp != null && runCatching { mp.isPlaying }.getOrDefault(false)) return
+        android.util.Log.w("MINova-Play", reason + " watchdog: skip song=" + songId)
+        playFailStreak++
+        if (playFailStreak < 3) {
+            _toastMessage.value = if (reason == "prepare") "该歌曲加载超时，已切换下一首" else "歌曲缓冲超时，已切换下一首"
+            playNext()
+        } else {
+            _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
+            _isPlaying.value = false
+        }
+    }
+
     /** 启动/重启播放器加载指定地址 */
     private fun startPrepare(url: String): Boolean = runCatching {
         mediaPlayer?.reset()
         mediaPlayer?.setDataSource(url)
+        preparedFlag = false
+        cancelPlaybackWatchdogs()
         mediaPlayer?.prepareAsync()
+        startPrepareWatchdog()
     }.isSuccess
+
+    /**
+     * 秒死候选轮换（onError / 错歌检测共用）：依次试下一个候选（最多 3 个、各 2.5s），
+     * 每个 startPrepare 重来；候选用尽 → 「该歌曲暂无免费音源，已跳过」+ 静默跳下一首。
+     * 宁可不播也不错播：轮换只信候选列表里过审的候选，绝不原地重解同一首。
+     */
+    private fun startCandidateRotation(song: Song) {
+        viewModelScope.launch {
+            var rotated = false
+            while (rotated.not() && playCandidateIdx + 1 < playCandidates.size && playCandidateIdx + 1 < 3 && rotationAttempts < 3) {
+                rotationAttempts++
+                playCandidateIdx++
+                val cand = playCandidates[playCandidateIdx]
+                val u = kotlinx.coroutines.withTimeoutOrNull(2_500) {
+                    runCatching { MusicApiClient.candidateUrl(cand.id, cand.source) }.getOrNull()
+                }
+                if (!u.isNullOrBlank() && u.startsWith("http") && _currentSong.value?.id == song.id) {
+                    lastResolvedSource = cand.source
+                    audioStartedAt = 0L
+                    android.util.Log.i(
+                        "MINova-Play",
+                        "candidate rotate -> candidate " + playCandidateIdx + " src=" + cand.source + " song=" + song.name
+                    )
+                    rotated = startPrepare(u)
+                }
+            }
+            if (!rotated) {
+                playFailStreak++
+                if (playFailStreak < 3) {
+                    _toastMessage.value = "该歌曲暂无免费音源，已跳过"
+                    playNext()
+                } else {
+                    _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
+                    _isPlaying.value = false
+                }
+            }
+        }
+    }
     /**
      * 按歌曲所属平台取歌词。
      * 关键：后端 id 只在同一平台内唯一 —— 用 kuwo 的 id 去 netease 取歌词会拿到另一首歌
@@ -1765,8 +1955,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         // 记住这轮播放来自哪个列表，供自动切歌使用。
         // 队列真的换了 → 预解析缓存作废（缓存是按「当前队列的下一首」算出来的）。
         if (!queue.isNullOrEmpty() && _playQueue.value != queue) {
+            // 换队列前保留「这次点击这首歌」的预解析结果 —— 清缓存是为了丢弃过期的
+            // 「下一首」预解析，但不能把用户正在点的这首的秒开缓存一起清掉。
+            val keep = prefetchedPlays[prefetchKey(song)]
             _playQueue.value = queue
             prefetchedPlays.clear()
+            if (keep != null) prefetchedPlays[prefetchKey(song)] = keep
         }
         // 去重：连续点同一首歌时不要重建播放器 —— 否则会多次起播/叠音。
         // 播放中 → 直接忽略；暂停中 → 继续播放。
@@ -1775,11 +1969,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             val playing = mp != null && runCatching { mp.isPlaying }.getOrDefault(false)
             if (playing) return
             if (mp != null) {
-                runCatching { mp.start() }
-                _isPlaying.value = true
-                return
+                // 播放器处于 error/reset 态时 start() 会抛 IllegalStateException ——
+                // 绝不能吞掉（吞掉后用户再点这首歌永远无声）：失败就走下面的完整重新解析。
+                if (runCatching { mp.start() }.isSuccess) {
+                    _isPlaying.value = true
+                    return
+                }
             }
         }
+        // 新歌开始：先取消旧看门狗，避免上一首的看门狗误伤这一首
+        cancelPlaybackWatchdogs()
         // 立即反馈：先同步更新 UI，避免等待网络造成“点击无反应”
         _isPlaying.value = false
         _currentSong.value = song
@@ -1789,6 +1988,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _currentLyricIndex.value = -1
         // 试听重试计数只对「当前这首歌」生效：每首歌起播归零
         previewRetryCount = 0
+        // onError 静默重解同样每首歌只允许一次：换歌时重置
+        errorRetryDone = false
         playJob?.cancel()
         playJob = viewModelScope.launch {
             releasePlayer()
@@ -1814,6 +2015,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         .build()
                 )
                 setOnPreparedListener { mp ->
+                        // 看门狗旗标：prepared 一到即置位并停掉 prepare 看门狗
+                        preparedFlag = true
+                        prepareWatchdogJob?.cancel()
+                        // 断点续播钳制：换源后新流时长/码率可能不同，断点 seek 超出新流可播范围会
+                        // 再次触发 onError → 「重解→再错→死循环」。应用 seek 前先把断点钳到
+                        // duration-5s 以内；剩余不足 5s（或时长读不到为 0）的断点直接从头播。
+                        if (pendingSeekMs > 0L) {
+                            val newDur = runCatching { mp.duration.toLong() }.getOrDefault(0L)
+                            pendingSeekMs = minOf(pendingSeekMs, maxOf(0L, newDur - 5000L))
+                        }
                         applyPendingSeek(mp)
                     val actual = mp.duration.toLong()
                     val expect = song.duration
@@ -1833,6 +2044,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         // 以前这里是「先去换源、换不到才播、换源期间不播」→ 表现为
                         // 「等半天没声音，手动点一下播放键才出声」。有声音永远优于干等。
                         runCatching { mp.start() }
+                        audioStartedAt = System.currentTimeMillis()
                         _isPlaying.value = true
                         _duration.value = actual
                         startProgressTracking()
@@ -1846,6 +2058,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         // 绝不再 playNext()：用户点的是这首歌，跳到别的歌就是「乱跳」。
                         // 播出来 + 明确提示，把选择权交给用户。
                         runCatching { mp.start() }
+                        audioStartedAt = System.currentTimeMillis()
                         _isPlaying.value = true
                         _duration.value = actual
                         startProgressTracking()
@@ -1855,11 +2068,26 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         return@setOnPreparedListener
                     }
                         // 单位修复后仍可能是试听：四个源都用尽却只拿到短片段，说明服务端 Cookie 对该曲无权限，                         // 明确提示用户，避免误以为「客户端又坏了 / 又只能听 30 秒」。                         if (actual > 0L && isPreview && playSourceIndex >= playSources.size) {                             _toastMessage.value = "该歌曲为会员专享，当前音源仅提供约 ${actual / 1000} 秒试听"                         }
+                    // ── 错歌防线（宁可不播也不错播）：本流实际时长与这首歌原时长差超过
+                    // max(10s, 15%) —— 同源同 id/过审候选不该差这么多（合法版本差异已被候选
+                    // 过滤的 ≤10s 挡住）→ 判定音频张冠李戴（如代理取错流），停掉并轮换候选。 ──
+                    if (expectMs > 0L && actual > 0L &&
+                        kotlin.math.abs(actual - expectMs) > maxOf(10_000L, expectMs * 15 / 100)
+                    ) {
+                        android.util.Log.w(
+                            "MINova-Play",
+                            "wrong-song guard: duration mismatch expect=" + expectMs / 1000 + "s actual=" + actual / 1000 + "s song=" + song.name
+                        )
+                        runCatching { mp.stop() }
+                        startCandidateRotation(song)
+                        return@setOnPreparedListener
+                    }
                     android.util.Log.i(
                         "MINova-Play",
                         "ready to play in " + (System.currentTimeMillis() - playStartedAt) + "ms song=" + song.name
                     )
                     mp.start()
+                    audioStartedAt = System.currentTimeMillis()
                     _isPlaying.value = true
                     _duration.value = actual
                     startProgressTracking()
@@ -1882,35 +2110,62 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     // 先在 reset 之前记下断点，重解成功后从这里继续播。
                     val resumePos = _currentPosition.value
                     player.reset()
+                    // ── 秒死候选轮换：起播 5 秒内报错（含 prepare 阶段就报错）→ 换下一个候选，
+                    // 而不是「重解同一首 → 同样秒死 → 切下一首」。候选最多轮换 3 个；用尽才提示+跳下一首。 ──
+                    val earlyDead = audioStartedAt == 0L ||
+                        (System.currentTimeMillis() - audioStartedAt) <= 5_000L
+                    if (earlyDead) {
+                        startCandidateRotation(song)
+                        return@setOnErrorListener true
+                    }
                     // 网易云的 outer 接口只能用网易云自己的 id。
                     // 别的平台（B站/酷我/酷狗…）的 id 丢进去，网易云会返回"同 id 的另一首歌"，
                     // 于是歌名/封面/歌词都对、声音却完全是另一首歌。非网易云一律跳过。
                     if (!song.source.equals("netease", ignoreCase = true) || neteaseFallbackTried) {
-                        // 播放到一半的流错误（网络抖动）≠「没找到音源」：
-                        // 静默重解同一首歌，拿到新直链就从断点续播；
-                        // 失败只暂停并提示 —— 不 playNext、不计入 playFailStreak
-                        //（那是「连续多首没音源」的计数；网络问题累积它，
-                        //  会让用户重播同一首时被误判成「连续多首找不到可用音源」）。
+                        // 每首歌只静默重解一次：重解后仍出错（如断点 seek 超出新流可播范围）
+                        // 绝不再原地重试 → 直接走「切下一首」，避免「重解→prepare/seek 再错→死循环」。
+                        if (errorRetryDone) {
+                            playFailStreak++
+                            if (playFailStreak < 3) {
+                                _toastMessage.value = "本首播放中断，已切换下一首"
+                                playNext()
+                            } else {
+                                _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
+                                _isPlaying.value = false
+                            }
+                            return@setOnErrorListener true
+                        }
+                        errorRetryDone = true
                         viewModelScope.launch {
                             // 重置源遍历状态：playSourceIndex/ownSourceTried 只在 playSong() 里重置，
                             // 起播时已把索引消耗到末尾，不重置的话播放中重解必然直接返回 null。
                             playSourceIndex = 0
                             ownSourceTried = false
                             val u = runCatching {
-                                kotlinx.coroutines.withTimeoutOrNull(8_000) { resolveNextPlayUrl(song) }
+                                kotlinx.coroutines.withTimeoutOrNull(4_000) { resolveNextPlayUrl(song) }
                             }.getOrNull()
                             if (!u.isNullOrBlank() && u.startsWith("http")) {
                                 runCatching {
                                     // 断点交给挂起 seek：onPrepared 开头 applyPendingSeek(mp)
-                                    // 会 seekTo(resumePos) 再 start → 从中断处继续，而不是从 0 重播。
+                                    // 会先钳制到新流 duration-5s 内再 seekTo → 从中断处继续，而不是从 0 重播。
                                     pendingSeekSongId = song.id
                                     pendingSeekMs = resumePos
                                     player.setDataSource(u)
                                     player.prepareAsync()
+                                    // 重解后的 prepare 同样可能挂在死链上 → 重启 prepare 看门狗
+                                    preparedFlag = false
+                                    startPrepareWatchdog()
                                 }
                             } else {
-                                _toastMessage.value = "网络波动，播放已暂停"
-                                _isPlaying.value = false
+                                // 重解失败 → 静默切下一首（1.3.2 行为），绝不暂停干等
+                                playFailStreak++
+                                if (playFailStreak < 3) {
+                                    _toastMessage.value = "本首播放中断，已切换下一首"
+                                    playNext()
+                                } else {
+                                    _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
+                                    _isPlaying.value = false
+                                }
                             }
                         }
                         return@setOnErrorListener true
@@ -1919,11 +2174,32 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     try {
                         player.setDataSource(apiService.getFallbackUrl(song.id))
                         player.prepareAsync()
+                        // 兜底直链同样可能永不 prepared → 重启 prepare 看门狗
+                        preparedFlag = false
+                        startPrepareWatchdog()
                     } catch (_: Exception) {
                         _toastMessage.value = "资源解析失败"
                         _isPlaying.value = false
                     }
                     true
+                }
+                // 缓冲卡死看门狗：BUFFERING_START 后 15 秒仍没 END 且没出声 → 自动切下一首
+                setOnInfoListener { mp, what, _ ->
+                    when (what) {
+                        MediaPlayer.MEDIA_INFO_BUFFERING_START -> {
+                            bufferWatchdogJob?.cancel()
+                            bufferWatchdogJob = viewModelScope.launch {
+                                delay(15_000L)
+                                if (_currentSong.value?.id != song.id) return@launch
+                                if (runCatching { mp.isPlaying }.getOrDefault(false)) return@launch
+                                android.util.Log.w("MINova-Play", "buffer watchdog: 15s no BUFFERING_END, skip song=" + song.name)
+                                // 同 prepare 看门狗：切歌动作 post 到主线程执行，不在协程栈内直接 playSong
+                                android.os.Handler(android.os.Looper.getMainLooper()).post { skipToNextOnWatchdog("buffer", song.id) }
+                            }
+                        }
+                        MediaPlayer.MEDIA_INFO_BUFFERING_END -> bufferWatchdogJob?.cancel()
+                    }
+                    false
                 }
             }
             // ── 统一解析：只用自建 API 的多源聚合，拿不到再兜底 ──
@@ -1942,9 +2218,35 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 playSources = playSources.filter { it != cached.source.lowercase() }
                 ownSourceTried = true
             }
+            // ── 快速起播：① 自身源快 CDN 直取 → ② 候选池并发抢答 → ③ netease 串流代理兜底 ──
+            // 起播后 5 秒内 onError → 轮换下一个候选（最多 3 个），不再「重解同一首→秒死→切歌」。
+            rotationAttempts = 0
+            audioStartedAt = 0L
+            playCandidateIdx = 0
+            val fast = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(12_000) {
+                    MusicApiClient.resolveFastUrl(song.id, song.name, song.artist, song.source, song.duration)
+                }
+            }.getOrNull()
+            playCandidates = fast?.candidates.orEmpty()
+            if (playCandidates.isEmpty() && song.id.isNotBlank()) {
+                // 极端兜底：连解析器都没给出候选 —— 用自身源占位，轮换至少还有一次机会
+                playCandidates = listOf(PlayCandidate(song.id, song.source.trim().lowercase().ifBlank { "netease" }, song.name))
+            }
+            if (fast?.cheapOwn == true) {
+                // 便宜路径（自身源直取）命中：后台补全跨源候选，供秒死轮换使用（不阻塞起播）
+                launch(Dispatchers.IO) {
+                    val full = runCatching {
+                        kotlinx.coroutines.withTimeoutOrNull(6_000) {
+                            MusicApiClient.resolvePlayCandidates(song.id, song.name, song.artist, song.source, song.duration)
+                        }
+                    }.getOrNull().orEmpty()
+                    if (full.isNotEmpty() && _currentSong.value?.id == song.id) playCandidates = full
+                }
+            }
             // 同上：非网易云绝不用网易云 outer 兜底，宁可判为"没找到"
             val firstUrl = cached?.url
-                ?: resolveNextPlayUrl(song)
+                ?: fast?.play?.url?.also { lastResolvedSource = fast.play.source }
                 ?: if (song.source.equals("netease", ignoreCase = true)) apiService.getFallbackUrl(song.id) else ""
             // 起播链路计时：cached=true 表示用的是上一首播放时预解析好的直链（0 网络等待）
             android.util.Log.i(
@@ -1954,11 +2256,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     " origin=" + song.source + " song=" + song.name
             )
             val ok = firstUrl.isNotBlank() && startPrepare(firstUrl)
+            // strictResolve 第二轮「同歌不同版本」命中 → 一次性提示（读后即清，绝不重复弹）
+            if (firstUrl.isNotBlank() && MusicApiClient.takeAlternateVersionHit()) {
+                AppToast.show("已为你匹配同歌曲其他版本")
+            }
             if (firstUrl.isBlank()) {
                 // 用户方案：这首找不到就继续切下一首（连续 3 首失败才停，避免狂跳）
                 playFailStreak++
                 if (playFailStreak < 3) {
-                    _toastMessage.value = "这首在免费音源里没找到，已跳过"
+                    // 明确文案：跨源严格/版本轮 + 串流代理都没找到（网易电台/小众内容属此类）
+                    _toastMessage.value = "该歌曲暂无免费音源，已跳过"
                     playNext()
                 } else {
                     _toastMessage.value = "连续多首找不到可用音源，已停止自动跳过"
@@ -1982,12 +2289,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         val mp0 = mediaPlayer ?: return@launch
                         val playing = runCatching { mp0.isPlaying }.getOrDefault(false)
                         if (playing) return@launch
-                        // 无条件 start()：对已在播放的播放器是无害的 no-op，
-                        // 对「已 prepared 却停在暂停态」的播放器，这正是手动点一次播放键的效果。
-                        runCatching { mp0.start() }
-                        _isPlaying.value = true
-                        startProgressTracking()
-                        updateMediaSession(true)
+                        // 只对「已 prepared 却停在暂停态」的播放器补那一下手动播放：
+                        // prepare 未完成时 start() 必抛且会把播放器打进 error 态，
+                        // 连锁触发 onError 重试/切歌 —— 起播等待应交给 prepare 看门狗（10 秒）统一裁决。
+                        if (preparedFlag && runCatching { mp0.start() }.isSuccess) {
+                            _isPlaying.value = true
+                            startProgressTracking()
+                            updateMediaSession(true)
+                        }
                         android.util.Log.i("MINova-Play", "auto-kick: attempt " + attempt + " song=" + song.name)
                     }
                 }
@@ -2033,6 +2342,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val i = q.indexOfFirst { it.id == cur.id }
         // 找不到就从头放；到末尾回到第一首（列表循环）
         val next = if (i >= 0) q[(i + 1) % q.size] else q.firstOrNull()
+        android.util.Log.i(
+            "MINova-Play",
+            "playNext: qSize=" + q.size + " curIdx=" + i + " cur=" + cur.name + " -> next=" + (next?.name ?: "null") +
+                " (fromQueue=" + (q === _playQueue.value) + ")"
+        )
         next?.let { playSong(it) }
     }
 
@@ -2119,6 +2433,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun releasePlayer() {
+        cancelPlaybackWatchdogs()
         progressJob?.cancel()
         mediaPlayer?.apply {
             if (isPlaying) stop()
@@ -4572,12 +4887,12 @@ fun MusicSearchTab(
         //   ④ 歌名更短优先（更接近原版标题）
         //   ⑤ id + source 兜底 → 同一组搜索结果每次顺序完全一致
         // 排序方向：默认倒序，用户可在列表顶部的标签里手动切成正序。
-        var searchSortDesc by remember { mutableStateOf(false) }
+        var searchSortDesc by remember { mutableStateOf(true) }
         val sortedSearchResults = remember(searchResults, searchSortDesc) {
             // 稳定排序：只按 垃圾版本 + 来源优先级 两个键，
             // 这样每个音源各自的相关度顺序会被保留（原唱通常在各源第一条）。
             val srcRank = mapOf(
-                "kuwo" to 0, "migu" to 1, "kugou" to 2, "qq" to 3, "netease" to 4,
+                "netease" to 0, "kuwo" to 1, "migu" to 2, "qq" to 3, "kugou" to 4,  // 用户要求：网易版本优先展示
                 "bilibili" to 5, "soda" to 6, "fivesing" to 7, "joox" to 8,
                 "jamendo" to 9, "qianqian" to 10
             )
@@ -4602,6 +4917,12 @@ fun MusicSearchTab(
                 )
             }
             if (searchSortDesc) ordered.asReversed() else ordered
+        }
+
+        // 搜索结果渲染即预解析可见前 5 首（并发、进 prefetchedPlays 缓存）：
+        // 用户点任何一首可见歌 → 缓存命中 0~1s 起播，不再等解析。
+        LaunchedEffect(sortedSearchResults) {
+            if (sortedSearchResults.isNotEmpty()) viewModel.prefetchSongs(sortedSearchResults.take(5))
         }
 
         Box(modifier = resultModifier) {
@@ -4725,7 +5046,7 @@ fun MusicSearchTab(
                                     isPlaying = isPlaying,
                                     isFirst = index == 0,
                                     isLast = index == sortedSearchResults.size - 1,
-                                    onClick = { viewModel.playSong(song) },
+                                    onClick = { viewModel.playSong(song, sortedSearchResults) },
                                     viewModel = viewModel,
                                     backdrop = backdrop,
                                     isInFavorites = false,
@@ -8297,7 +8618,7 @@ fun junkFlagsFor(songs: List<Song>): BooleanArray? =
 fun sortSearchResults(list: List<Song>, mode: Int, keyword: String = ""): List<Song> {
     if (list.size <= 1) return list
     val srcRank = mapOf(
-        "kuwo" to 0, "migu" to 1, "kugou" to 2, "qq" to 3, "netease" to 4, "bilibili" to 5
+        "netease" to 0, "kuwo" to 1, "migu" to 2, "qq" to 3, "kugou" to 4,  // 用户要求：网易版本优先展示 "bilibili" to 5
     )
     val kw = keyword.trim().lowercase()
     // 搜索词里是否点名了这位歌手（歌手可能是 "A/B"、"A、B"、"A & B" 这种多值）。
@@ -8558,7 +8879,7 @@ fun HistoryScreen(
                                 isPlaying = isPlaying,
                                 isFirst = index == 0,
                                 isLast = index == filteredHistory.size - 1,
-                                onClick = { viewModel.playSong(song) },
+                                onClick = { viewModel.playSong(song, filteredHistory) },
                                 viewModel = viewModel,
                                 backdrop = backdrop,
                                 isInFavorites = false,
@@ -8701,8 +9022,7 @@ class MainActivity : ComponentActivity() {
         val conf = Configuration(newBase.resources.configuration)
         conf.fontScale = 1.0f                       // 忽略系统字体缩放，软件始终保持原大小
         val prefs = newBase.getSharedPreferences("app_display", Context.MODE_PRIVATE)
-        val frozenDpi = prefs.getInt("density_dpi", -1)
-        if (frozenDpi > 0) conf.densityDpi = frozenDpi  // 冻结显示密度（首次启动时由 App 捕获）
+        conf.densityDpi = (newBase.resources.configuration.densityDpi * 0.9f).toInt()  // 用户要求 0.9
         applyOverrideConfiguration(conf)
         super.attachBaseContext(newBase)
     }
@@ -8735,6 +9055,8 @@ class MainActivity : ComponentActivity() {
         }
 
         com.google.android.gms.ads.MobileAds.initialize(this)
+
+
 
         setContent {
     val viewModel: PlayerViewModel = viewModel()
@@ -9155,56 +9477,99 @@ class MainActivity : ComponentActivity() {
                                 Button(onClick = {
                                     isDownloading = true
                                     scope.launch(Dispatchers.IO) {
+                                        // 镜像加速链：依次尝试每个候选 URL，完整下载且校验通过才算成功，失败自动切下一个
+                                        val ver = update.version.trim().removePrefix("v").removePrefix("V")
+                                        val ghAsset = "https://github.com/Mintllo/MINova/releases/download/v$ver/MINova_${ver}_release.apk"
+                                        val candidates = listOf(
+                                            "https://ghfast.top/$ghAsset",
+                                            "https://gh-proxy.com/$ghAsset",
+                                            "https://github.moeyy.xyz/$ghAsset",
+                                            update.updateUrl
+                                        )
+                                        val apkFile = File(cacheDir, "update.apk")
+                                        val partFile = File(cacheDir, "update.part")
+                                        // 单个候选：下载到临时文件，完成后校验（服务器直连按 Content-Length 对比大小，镜像校验 ZIP 中央目录完整性）
+                                        suspend fun tryCandidate(urlStr: String, isServerDirect: Boolean): Boolean {
+                                            val connection = URL(urlStr).openConnection() as HttpURLConnection
+                                            connection.connectTimeout = 15000
+                                            connection.readTimeout = 30000
+                                            var fileLength = -1
                                             try {
-                                                val url = URL(update.updateUrl)
-                                                val connection = url.openConnection() as HttpURLConnection
                                                 connection.connect()
-                                                val fileLength = connection.contentLength
-                                                val inputStream = connection.inputStream
-                                                val apkFile = File(cacheDir, "update.apk")
-                                                val outputStream = apkFile.outputStream()
-                                                val buffer = ByteArray(1024)
-                                                var totalRead = 0L
-                                                var read: Int
-                                                while (inputStream.read(buffer).also { read = it } != -1) {
-                                                    totalRead += read
-                                                    outputStream.write(buffer, 0, read)
-                                                    withContext(Dispatchers.Main) {
-                                                        downloadProgress = if (fileLength > 0) totalRead.toFloat() / fileLength else 0f
-                                                    }
-                                                }
-                                                outputStream.close()
-                                                inputStream.close()
-                                                connection.disconnect()
-                                                withContext(Dispatchers.Main) {
-                                                    isDownloading = false
-                                                    showUpdateSheet = false
-                                                    viewModel.showUpdate = false
-                                                    try {
-                                                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
-                                                        val apkUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                                            androidx.core.content.FileProvider.getUriForFile(
-                                                                this@MainActivity,
-                                                                "${packageName}.fileprovider",
-                                                                apkFile
-                                                            )
-                                                        } else {
-                                                            android.net.Uri.fromFile(apkFile)
+                                                fileLength = connection.contentLength
+                                                connection.inputStream.use { input ->
+                                                    partFile.outputStream().use { output ->
+                                                        val buffer = ByteArray(65536)
+                                                        var totalRead = 0L
+                                                        var read: Int
+                                                        while (input.read(buffer).also { read = it } != -1) {
+                                                            totalRead += read
+                                                            output.write(buffer, 0, read)
+                                                            withContext(Dispatchers.Main) {
+                                                                downloadProgress = if (fileLength > 0) (totalRead.toFloat() / fileLength).coerceIn(0f, 1f) else 0f
+                                                            }
                                                         }
-                                                        intent.setDataAndType(apkUri, "application/vnd.android.package-archive")
-                                                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                        intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                                        startActivity(intent)
-                                                    } catch (e: Exception) {
-                                                        AppToast.show("安装失败")
+                                                        output.flush()
                                                     }
                                                 }
-                                            } catch (e: Exception) {
-                                                withContext(Dispatchers.Main) {
-                                                    isDownloading = false
-                                                    AppToast.show("下载失败")
+                                            } finally {
+                                                connection.disconnect()
+                                            }
+                                            val sizeOk = partFile.length() > 0 && (fileLength <= 0 || partFile.length() == fileLength.toLong())
+                                            var zipOk = false
+                                            if (!isServerDirect && sizeOk) {
+                                                zipOk = try {
+                                                    java.util.zip.ZipFile(partFile).use { zf ->
+                                                        val entries = zf.entries()
+                                                        var count = 0
+                                                        while (entries.hasMoreElements()) { entries.nextElement(); count++ }
+                                                        count > 0
+                                                    }
+                                                } catch (_: Exception) { false }
+                                            }
+                                            if (sizeOk && (isServerDirect || zipOk)) {
+                                                if (apkFile.exists()) apkFile.delete()
+                                                if (partFile.renameTo(apkFile)) return true
+                                            }
+                                            partFile.delete()
+                                            return false
+                                        }
+                                        var installed = false
+                                        for (candidate in candidates) {
+                                            try {
+                                                if (tryCandidate(candidate, candidate == update.updateUrl)) { installed = true; break }
+                                            } catch (_: Exception) { }
+                                        }
+                                        if (installed) {
+                                            withContext(Dispatchers.Main) {
+                                                isDownloading = false
+                                                showUpdateSheet = false
+                                                viewModel.showUpdate = false
+                                                try {
+                                                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
+                                                    val apkUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                                        androidx.core.content.FileProvider.getUriForFile(
+                                                            this@MainActivity,
+                                                            "${packageName}.fileprovider",
+                                                            apkFile
+                                                        )
+                                                    } else {
+                                                        android.net.Uri.fromFile(apkFile)
+                                                    }
+                                                    intent.setDataAndType(apkUri, "application/vnd.android.package-archive")
+                                                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                    startActivity(intent)
+                                                } catch (e: Exception) {
+                                                    AppToast.show("安装失败")
                                                 }
                                             }
+                                        } else {
+                                            withContext(Dispatchers.Main) {
+                                                isDownloading = false
+                                                AppToast.show("下载失败")
+                                            }
+                                        }
                                     }
                                 }) { Text("立即更新") }
                             }
@@ -9414,6 +9779,32 @@ data class ChangelogEntry(val version: String, val items: List<String>)
 
 /** 各版本改动要点（只写项目里真实存在 / 真实修过的内容）。 */
 private val CHANGELOG: List<ChangelogEntry> = listOf(
+        ChangelogEntry(
+        version = "1.3.4",
+                items = listOf(
+            "大幅提升播放稳定性：个别歌曲加载不出来时会在几秒内自动换下一首",
+            "播放中断自动从断点续播，不再误报没找到音源",
+            "搜索结果直接来自免费音源（酷狗/米咕/千千），点开即播，冷门歌也能找到",
+            "应用内更新下载全面提速",
+            "修复安卓 11 / 12 设备启动闪退，界面不再受系统缩放影响",
+            "整体性能与兼容性优化，播放更流畅",
+            "免费歌曲的播放成功率进一步提升",
+            "操作提示改为应用内气泡样式，收藏优先保存到云端"
+        )
+    ),
+        ChangelogEntry(
+        version = "1.3.3",
+                items = listOf(
+            "搜索结果直接来自免费音源（酷狗/米咕/千千），点开即播",
+            "播放中断自动重连并从断点继续，不再误报没找到音源",
+            "歌曲加载不出来时会在几秒内自动切换下一首",
+            "修复安卓 11 / 12 设备启动闪退，界面不再被系统缩放影响",
+            "悬浮歌词文字居中且不再抖动，面板设置全部即时生效并支持自定义调色",
+            "蝌蚪进度条对齐官方 MD3 波浪样式",
+            "推荐页分区与加载稳定性修复，无封面歌曲统一占位图",
+            "操作提示改为应用内气泡样式，收藏优先保存到云端"
+        )
+    ),
         ChangelogEntry(
         version = "1.3.2",
                 items = listOf(

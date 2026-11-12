@@ -708,7 +708,7 @@ fun FavoritesScreen(
                                 isPlaying = isPlaying,
                                 isFirst = index == 0,
                                 isLast = index == filteredFavorites.size - 1,
-                                onClick = { viewModel.playSong(song) },
+                                onClick = { viewModel.playSong(song, filteredFavorites) },
                                 viewModel = viewModel,
                                 backdrop = backdrop,
                                 isInFavorites = true,
@@ -877,12 +877,12 @@ fun ChangelogScreen(
         var showOldLogs by remember { mutableStateOf(false) }
             // v1.3.1 的条目统一来自 MainActivity 的 changelogEntries()（设置页入口已下线，
             // 更新日志入口只在「账号」页；内容与数据源保持同一份，避免"入口有、条目旧"）。
-            changelogEntries().firstOrNull { it.version == "1.3.1" }?.let { entry ->
+                        changelogEntries().forEachIndexed { idx, entry ->
                 ChangelogItem(
-                    version = "v" + entry.version + " 正式版",
-                    date = "2026年11月8日",
+                    version = "v" + entry.version + if (idx == 0) " 正式版" else "",
+                    date = mapOf("1.3.4" to "2026年11月12日 01:27", "1.3.3" to "2026年11月11日 19:41", "1.3.2" to "2026年11月8日 21:30", "1.3.1" to "2026年11月8日 18:00")[entry.version] ?: "",
                     changes = entry.items,
-                    isLatest = true,
+                    isLatest = idx == 0,
                     backdrop = backdrop
                 )
             }

@@ -14,7 +14,7 @@ class App : Application() {
         // 之后用户再改系统「显示大小」也不影响应用；MainActivity.attachBaseContext 读取该值。
         val prefs = getSharedPreferences("app_display", Context.MODE_PRIVATE)
         if (!prefs.contains("density_dpi")) {
-            val dpi = resources.configuration.densityDpi
+            val dpi = resources.configuration.densityDpi  // 记录用：缩放统一在 MainActivity ×0.9
             if (dpi > 0) prefs.edit().putInt("density_dpi", dpi).apply()
         }
     }

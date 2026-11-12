@@ -123,6 +123,7 @@ enum class MusicSource(val label: String) {
     KUGOU("酷狗音乐"),
     KUWO("酷我音乐"),
     MIGU("咪咕音乐"),
+    BILIBILI("B站"),
 
     /** Internet Archive 免费曲库：公共领域 / CC 授权的录音，合法且可直接串流。 */
     ARCHIVE("免费曲库"),
@@ -356,6 +357,7 @@ private fun sourceIcon(src: MusicSource): ImageVector = when (src) {
     MusicSource.KUGOU -> Icons.Rounded.QueueMusic
     MusicSource.KUWO -> Icons.Rounded.LibraryMusic
     MusicSource.MIGU -> Icons.Rounded.Radio
+    MusicSource.BILIBILI -> Icons.Rounded.PlayArrow
     MusicSource.ARCHIVE -> Icons.Rounded.LibraryMusic
     MusicSource.LOCAL -> Icons.Rounded.Folder
     MusicSource.OTHER -> Icons.Rounded.MoreHoriz

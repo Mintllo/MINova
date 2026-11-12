@@ -264,7 +264,12 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
         val tasteHitKeys = java.util.Collections.synchronizedSet(HashSet<String>())
         fun songKey(s: Song) = (s.name + "|" + s.artist).lowercase()
 
-        fun distribute(list: List<Song>, rndSeed: Long) {
+        /**
+         * 分区渲染。persistDaily=false 用于**渐进渲染**（每批关键词到达就先渲一版）：
+         * 此时「每日 30 首」只做内存展示、**不落盘** —— 否则当天会被第一批的小池子定死。
+         * 全部批次到齐后的最终调用（persistDaily=true）才持久化。
+         */
+        fun distribute(list: List<Song>, rndSeed: Long, persistDaily: Boolean = true) {
             val rnd = java.util.Random(rndSeed)
 
             // ── 加权打分推荐（可解释）──
@@ -351,13 +356,17 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     val restored = RecommendPrefs.dailyIds(ctx).mapNotNull { byId[it] }
                     if (restored.size >= 5) restored
                     else diversify(ranked, minOf(30, maxOf(6, ranked.size / 2))).also {
-                        RecommendPrefs.saveDaily(ctx, today, it.map { s -> s.id })
-                        RecommendPrefs.saveDailyCache(ctx, it)
+                        if (persistDaily) {
+                            RecommendPrefs.saveDaily(ctx, today, it.map { s -> s.id })
+                            RecommendPrefs.saveDailyCache(ctx, it)
+                        }
                     }
                 }
                 else -> diversify(ranked, minOf(30, maxOf(6, ranked.size / 2))).also {
-                    RecommendPrefs.saveDaily(ctx, today, it.map { s -> s.id })
-                    RecommendPrefs.saveDailyCache(ctx, it)
+                    if (persistDaily) {
+                        RecommendPrefs.saveDaily(ctx, today, it.map { s -> s.id })
+                        RecommendPrefs.saveDailyCache(ctx, it)
+                    }
                 }
             }
             // 不足 30 首时用候选池补足（diversify 同歌手上限会减员，导致 28/29 首）
@@ -368,8 +377,10 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     val extra = ranked.filter { it.id !in have }.take(30 - pick.size)
                     if (extra.isNotEmpty()) {
                         pick = pick + extra
-                        RecommendPrefs.saveDaily(ctx, today, pick.map { s -> s.id })
-                        RecommendPrefs.saveDailyCache(ctx, pick)
+                        if (persistDaily) {
+                            RecommendPrefs.saveDaily(ctx, today, pick.map { s -> s.id })
+                            RecommendPrefs.saveDailyCache(ctx, pick)
+                        }
                     }
                 }
                 pick
@@ -422,7 +433,11 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
         // 口味词放最前面，保证一定进 take(18)
         val allKeywords = (tasteA + tasteG + baseKeywords + seedArtists + recentKeywords).distinct().take(18)
 
-        suspend fun fetchPool(keywords: List<String>): List<Song> {
+        // 渐进渲染：每批到达就重跑 distribute（persistDaily=false 不落盘），
+        // 首屏 3 个关键词出第一批就先看到内容，不用等全部 18 个词拉完（加载指示保留到最后）。
+        var progressivePool: List<Song> = emptyList()
+
+        suspend fun fetchPool(keywords: List<String>, onBatch: (List<Song>) -> Unit = {}): List<Song> {
             val bucket = java.util.Collections.synchronizedList(ArrayList<Song>())
             kotlinx.coroutines.coroutineScope {
                 keywords.chunked(3).forEach { batch ->
@@ -442,6 +457,8 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                         }
                     }
                     jobs.map { it.await() }.forEach { list -> bucket.addAll(list) }
+                    // 每批到达即回调 → 渐进渲染
+                    onBatch(bucket.toList())
                 }
             }
             return bucket.toList()
@@ -456,7 +473,15 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
             return map.values.toList()
         }
 
-        var allSongs = dedup(fetchPool(allKeywords))
+        val fetched = fetchPool(allKeywords) { batchList ->
+            progressivePool = dedup(progressivePool + batchList)
+            if (progressivePool.isNotEmpty()) {
+                distribute(progressivePool, seedSongs.size.toLong() * 31 + tick, persistDaily = false)
+                // 首批到达即预解析可见前 5 首：推荐页点歌同样 0~1s 起播（缓存命中）
+                viewModel.prefetchSongs(progressivePool.take(5))
+            }
+        }
+        var allSongs = dedup(fetched)
         // 兜底：全空时等 1.2s 用最核心的两个词再试一次
         if (allSongs.isEmpty()) {
             delay(1200L)
@@ -654,7 +679,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                 SectionHeader(
                     title = "你可能感兴趣",
                     enterIndex = 5,
-                    onPlayAll = { interest.firstOrNull()?.let { viewModel.playSong(it) } },
+                    onPlayAll = { interest.firstOrNull()?.let { viewModel.playSong(it, interest) } },
                     onHide = { hiddenSections = hiddenSections + "interest" }
                 )
             }
@@ -663,7 +688,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                     songs = interest,
                     favoriteIds = favoriteIds,
                     playCounts = playCounts,
-                    onPlay = { viewModel.playSong(it, similar) },
+                    onPlay = { viewModel.playSong(it, interest) },
                     onToggleFavorite = { s ->
                         if (s.id in favoriteIds) viewModel.removeFromFavorites(s.id)
                         else viewModel.addToFavorites(s)

@@ -3,6 +3,7 @@ package com.HyperX.MI.Na
 import android.content.Context
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -125,6 +126,27 @@ data class ResolvedPlay(
     val id: String,
 )
 
+/**
+ * 起播候选（[MusicApiClient.resolvePlayCandidates] 返回，已排序）：
+ * UI 层按序解析地址起播；**起播后 5 秒内 onError = 候选 URL 秒死** → 轮换下一个候选（最多 3 个），
+ * 而不是「重解同一首 → 同样秒死 → 切下一首」。
+ */
+data class PlayCandidate(
+    val id: String,
+    val source: String,
+    val name: String = "",
+)
+
+/**
+ * 一次「快速解析」的结果：胜出直链 + 候选列表（供起播后秒死轮换使用）。
+ * cheapOwn=true 表示走了「自身源快 CDN 直取」便宜路径（1 次请求，无搜索）。
+ */
+data class FastResolve(
+    val play: ResolvedPlay,
+    val candidates: List<PlayCandidate>,
+    val cheapOwn: Boolean = false,
+)
+
 // ============================================================================
 //  版本归一化：把「同一首歌的不同版本」区分开
 //  （DJ版 / Live / Remix / 伴奏 / 翻唱 / 纯音乐 …）
@@ -206,6 +228,7 @@ fun MusicSource.apiSourceName(): String? = when (this) {
     MusicSource.KUGOU -> "kugou"
     MusicSource.KUWO -> "kuwo"
     MusicSource.MIGU -> "migu"
+    MusicSource.BILIBILI -> "bilibili"
     MusicSource.ARCHIVE -> "archive"
     MusicSource.LOCAL, MusicSource.OTHER -> null
 }
@@ -256,6 +279,20 @@ object MusicApiClient {
 
     /** 该来源能否扫码登录。 */
     fun qrSupported(source: MusicSource): Boolean = source.qrSourceName() != null
+
+    /**
+     * strictResolve 第二轮「同歌不同版本」命中标记（一次性）：
+     * 命中时置 true，UI 层在解析成功后调 [takeAlternateVersionHit] 取走并清除（用于 toast）。
+     */
+    @Volatile
+    private var alternateVersionHit = false
+
+    /** UI 层调用：取走并清除「第二轮命中」标记。true = 本次解析命中了同歌曲的其它版本。 */
+    fun takeAlternateVersionHit(): Boolean {
+        val v = alternateVersionHit
+        alternateVersionHit = false
+        return v
+    }
 
     // ------------------------------------------------------------------
     // 业务接口
@@ -370,6 +407,9 @@ object MusicApiClient {
 
     /** 跨源匹配允许的最大时长差（秒）。 */
     private const val STRICT_DURATION_TOLERANCE_SEC = 3L
+
+    /** 第二轮「同歌不同版本」允许的最大时长差（秒）：版本时长可能不同（Live/重制等），放宽到 10s。 */
+    private const val VERSION_DURATION_TOLERANCE_SEC = 10L
 
     /** 源优先级：越靠前越小。 */
     private fun sourcePriority(src: String): Int =
@@ -529,6 +569,32 @@ object MusicApiClient {
         return true
     }
 
+    /**
+     * 第二轮「同歌不同版本」准入判定（比 [isStrictSameSong] 宽，但歌手校验更严）：
+     *   ① 基准歌名键相等（[songTitleKey]，已剥离版本修饰词/含版本词的括号片段；
+     *      B 站风格 "正标题/上传者" 先取 "/" 前段）
+     *   ② 歌手交集**强制命中**（与第一轮不同：一方 artist 为空不再放行 —— 日文/小众歌
+     *      的同名不同人极多，宁可不播也不错播）
+     *   ③ 双方 duration 都 > 0 时，差值 <= [VERSION_DURATION_TOLERANCE_SEC]（版本时长可能不同）
+     * 用途：第一轮严格同版本没命中时，跨平台找「同一首歌的其它版本」（如 Faded (即刻电音版) → 酷我的 Faded）。
+     */
+    private fun isSameSongOtherVersion(
+        cand: PlaylistSong,
+        targetArtist: String,
+        targetDurationSec: Long,
+        targetBaseKey: String,
+    ): Boolean {
+        if (targetBaseKey.isBlank()) return false
+        if (songTitleKey(cand.name.substringBefore("/")) != targetBaseKey) return false
+        val candArtistTokens = strictArtistTokens(cand.artist)
+        val targetArtistTokens = strictArtistTokens(targetArtist)
+        if (candArtistTokens.isEmpty() || targetArtistTokens.isEmpty()) return false
+        if (!strictArtistIntersect(cand.artist, targetArtist)) return false
+        val delta = durationDeltaSeconds(cand.duration, targetDurationSec)
+        if (delta != null && delta > VERSION_DURATION_TOLERANCE_SEC) return false
+        return true
+    }
+
     /** 搜索关键词：从「精确」到「宽松」依次尝试（校验始终严格，关键词宽松不会放错歌）。 */
     private fun strictSearchKeywords(name: String, artist: String): List<String> {
         val clean = strictCleanTitle(name)
@@ -581,10 +647,13 @@ object MusicApiClient {
     /**
      * 跨源严格解析 —— **所有**跨源播放都必须走这里。
      *
-     * 1. 在给定源里按关键词搜索；
-     * 2. 只用 [isStrictSameSong] 过滤（三重校验，任一不满足直接丢）；
-     * 3. 排序：有明确时长指纹的优先 → 时长差小的优先 → 源优先级高的优先；
-     * 4. 按序尝试解析直链，第一个成功的即返回；全失败返回 null（宁可跳过）。
+     * 1. 在给定源里按关键词搜索（**只搜一次**，两轮共用同一份候选池）；
+     * 2. 第一轮：只用 [isStrictSameSong] 过滤（三重校验，任一不满足直接丢）——最忠实原版；
+     * 3. 第二轮（新增）：第一轮全败时，用 [isSameSongOtherVersion] 过滤「同歌不同版本」
+     *    （基准歌名相等 + 歌手交集 + 时长差 <= 10s；跳过第一轮已试过的候选）；
+     * 4. 两轮都用同一套排序：有明确时长指纹的优先 → 时长差小的优先 → 源优先级高的优先，
+     *    按序尝试解析直链，第一个成功的即返回；全失败返回 null（宁可跳过）。
+     * 第二轮命中时置 [alternateVersionHit]（UI 层读取后 toast「已为你匹配同歌曲其他版本」）。
      */
     private suspend fun strictResolve(
         name: String,
@@ -597,31 +666,225 @@ object MusicApiClient {
         val keywords = strictSearchKeywords(name, artist)
         if (keywords.isEmpty()) return null
 
-        val found = LinkedHashMap<String, StrictCandidate>()
-        for (src in sources) {
-            for (kw in keywords) {
-                val list = runCatching { searchSongs(kw, MusicSource.fromName(src)) }.getOrNull().orEmpty()
-                for (c in list) {
-                    if (c.id.isBlank()) continue
-                    // ← 三重校验：歌名归一化完全相等 + 歌手交集 + 双方时长都>0时差 <= 3s
-                    if (!isStrictSameSong(c, name, artist, targetDurationSec)) continue
-                    val k = src + "|" + c.id
-                    if (found.containsKey(k)) continue
-                    found[k] = StrictCandidate(c, src, durationDeltaSeconds(c.duration, targetDurationSec))
-                }
-            }
-        }
-        if (found.isEmpty()) return null
+        // 基准歌名键（去版本修饰）：第二轮「同歌不同版本」的比较键
+        val baseKey = songTitleKey(name.substringBefore("/"))
 
-        val ordered = found.values.sortedWith(
-            compareBy<StrictCandidate> { if (it.durationDelta == null) 1 else 0 }  // 有指纹的优先
-                .thenBy { it.durationDelta ?: Long.MAX_VALUE }                     // 时长差最小
-                .thenBy { sourcePriority(it.src) }                                 // 同分选源优先级更高
-        )
-        for (cand in ordered) {
-            tryResolveUrl(cand.song.id, cand.src)?.let { return ResolvedPlay(it, cand.src, cand.song.id) }
+        // 只发一轮搜索请求：把所有源、所有关键词的结果收集成一份候选池，两轮过滤共用
+        val pool = collectStrictCandidates(name, artist, targetDurationSec, sources, keywords)
+        if (pool.isEmpty()) return null
+
+        val tried = HashSet<String>()
+        suspend fun attempt(cands: Collection<StrictCandidate>): ResolvedPlay? {
+            for (cand in orderCandidates(cands)) {
+                tried.add(cand.src + "|" + cand.song.id)
+                tryResolveUrl(cand.song.id, cand.src)?.let { return ResolvedPlay(it, cand.src, cand.song.id) }
+            }
+            return null
+        }
+
+        // 第一轮：严格同版本（含版本修饰 + 时长差 <= 3s）
+        attempt(pool.values.filter { isStrictSameSong(it.song, name, artist, targetDurationSec) })?.let {
+            android.util.Log.i("MINova-HTTP", "strictResolve round=1(strict) hit src=" + it.source + " id=" + it.id)
+            return it
+        }
+        // 第二轮：同歌不同版本（基准歌名 + 歌手交集 + 时长差 <= 10s；跳过第一轮已试过的候选）
+        attempt(
+            pool.values.filter {
+                val k = it.src + "|" + it.song.id
+                !tried.contains(k) && isSameSongOtherVersion(it.song, artist, targetDurationSec, baseKey)
+            }
+        )?.let {
+            alternateVersionHit = true
+            android.util.Log.i("MINova-HTTP", "strictResolve round=2(otherVersion) hit src=" + it.source + " id=" + it.id)
+            return it
         }
         return null
+    }
+
+    /** 汇集候选池：给定源 × 关键词各搜一次，按 `src|id` 去重（两轮过滤共用，不重复发请求）。
+     *  源之间**并行**搜索（互不依赖；串行时 5 源 × 4 词在慢后端下轻松超过起播预算）。 */
+    private suspend fun collectStrictCandidates(
+        name: String,
+        artist: String,
+        targetDurationSec: Long,
+        sources: List<String>,
+        keywords: List<String> = strictSearchKeywords(name, artist),
+    ): LinkedHashMap<String, StrictCandidate> {
+        val pool = LinkedHashMap<String, StrictCandidate>()
+        if (keywords.isEmpty()) return pool
+        val perSource: List<Pair<String, List<PlaylistSong>>> = kotlinx.coroutines.coroutineScope {
+            sources.map { src ->
+                async(Dispatchers.IO) {
+                    val merged = ArrayList<PlaylistSong>()
+                    for (kw in keywords) {
+                        merged.addAll(runCatching { searchSongs(kw, MusicSource.fromName(src)) }.getOrNull().orEmpty())
+                    }
+                    src to merged
+                }
+            }.map { it.await() }
+        }
+        for ((src, list) in perSource) {
+            for (c in list) {
+                if (c.id.isBlank()) continue
+                val k = src + "|" + c.id
+                if (pool.containsKey(k)) continue
+                pool[k] = StrictCandidate(c, src, durationDeltaSeconds(c.duration, targetDurationSec))
+            }
+        }
+        return pool
+    }
+
+    /** 既定候选排序：有明确时长指纹的优先 → 时长差小的优先 → 源优先级高的优先。 */
+    private fun orderCandidates(cands: Collection<StrictCandidate>): List<StrictCandidate> =
+        cands.sortedWith(
+            compareBy<StrictCandidate> { if (it.durationDelta == null) 1 else 0 }
+                .thenBy { it.durationDelta ?: Long.MAX_VALUE }
+                .thenBy { sourcePriority(it.src) }
+        )
+
+    /**
+     * 并发抢答（Promise.any 语义）：所有候选**同时**解析直链（/music/url 直链，各 2.5s 预算），
+     * 总预算 3s。快 CDN 源的结果先到先得立即胜出；非快 CDN 结果先暂存，
+     * 快源全败时用第一个暂存结果（慢源自然被快源跑赢）。
+     * 输家在独立 scope 里自然超时，不阻塞调用方。
+     */
+    private suspend fun raceFirstUrl(candidates: List<PlayCandidate>): ResolvedPlay? {
+        if (candidates.isEmpty()) return null
+        val ch = kotlinx.coroutines.channels.Channel<ResolvedPlay>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val raceScope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+        candidates.forEach { c ->
+            raceScope.launch {
+                val u = runCatching {
+                    kotlinx.coroutines.withTimeoutOrNull(2_500) { tryResolveUrl(c.id, c.source) }
+                }.getOrNull()
+                if (!u.isNullOrBlank() && u.startsWith("http")) ch.trySend(ResolvedPlay(u, c.source, c.id))
+            }
+        }
+        var winner: ResolvedPlay? = null
+        var slow: ResolvedPlay? = null
+        val deadline = System.currentTimeMillis() + 3_000
+        while (winner == null && System.currentTimeMillis() < deadline) {
+            val left = (deadline - System.currentTimeMillis()).coerceAtLeast(1)
+            val msg = kotlinx.coroutines.withTimeoutOrNull(left) { ch.receive() } ?: break
+            if (msg.source in FAST_CDN_SOURCES) winner = msg else if (slow == null) slow = msg
+        }
+        ch.close()
+        return winner ?: slow
+    }
+
+    /**
+     * 快速解析（起播与预解析共用，1~2s 体感的根基）：
+     *  ① 便宜路径：自身源快 CDN 同 id 直取（1 次请求、无搜索，通常 <1s）→ 命中即返回；
+     *  ② 候选池（源间并行搜索，6s 预算）→ [raceFirstUrl] 并发抢答（2.5s/候选、3s 总预算）；
+     *  ③ netease 收尾：抢答胜出是 netease 直链时**优先改走串流代理**（直链 prepare 慢 31s，
+     *     代理服务端取流 prepare ~1s）；抢答全败也走串流代理；代理不可用才回退 netease 直链。
+     * 返回值带完整候选列表，供 UI 层秒死轮换（cheapOwn 命中时候选列表只有自身源，
+     * UI 层应在后台补全，见 MainActivity.playSong）。
+     */
+    suspend fun resolveFastUrl(
+        songId: String,
+        name: String,
+        artist: String,
+        knownSource: String,
+        durationSec: Long = 0L,
+    ): FastResolve? = withContext(Dispatchers.IO) {
+        val own = knownSource.trim().lowercase()
+        // ① 自身源快 CDN 直取（1 请求）
+        if (own in FAST_CDN_SOURCES && songId.isNotBlank()) {
+            val u = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(2_500) { tryResolveUrl(songId, own) }
+            }.getOrNull()
+            if (!u.isNullOrBlank() && u.startsWith("http")) {
+                return@withContext FastResolve(
+                    ResolvedPlay(u, own, songId),
+                    listOf(PlayCandidate(songId, own, name)),
+                    cheapOwn = true,
+                )
+            }
+        }
+        // ①' 自身源 = netease：串流代理 URL **零请求即时返回**（服务端取流，prepare ~1s）。
+        // 8 秒卡顿的根源是「候选池搜索 2~6s + 抢答 3s」排在起播前面 —— netease 歌不再等搜索，
+        // 代理直接先播；跨源并发抢答移到后台补全（结果只作秒死轮换弹药）。
+        if (own == "netease" && songId.isNotBlank()) {
+            val proxy = streamProxyUrl(songId, "netease")
+            if (proxy != null) {
+                return@withContext FastResolve(
+                    ResolvedPlay(proxy, "netease", songId),
+                    listOf(PlayCandidate(songId, "netease", name)),
+                    cheapOwn = true,
+                )
+            }
+        }
+        // ② 候选池 + 并发抢答
+        val candidates = runCatching {
+            kotlinx.coroutines.withTimeoutOrNull(6_000) {
+                resolvePlayCandidates(songId, name, artist, knownSource, durationSec)
+            }
+        }.getOrNull().orEmpty()
+        val list = candidates.ifEmpty {
+            listOf(PlayCandidate(songId, own.ifBlank { "netease" }, name))
+        }
+        val raced = raceFirstUrl(list)
+        // ③ netease 收尾：串流代理优先于 netease 直链
+        val neteaseCand = list.firstOrNull { it.source.equals("netease", true) }
+        val proxyUrl = neteaseCand?.let { streamProxyUrl(it.id, "netease") }
+        when {
+            raced != null && !raced.source.equals("netease", true) ->
+                FastResolve(raced, list)
+            proxyUrl != null ->
+                FastResolve(ResolvedPlay(proxyUrl, "netease", neteaseCand.id), list)
+            raced != null ->
+                FastResolve(raced, list)
+            else -> null
+        }
+    }
+
+    /**
+     * 起播候选列表（**已排序**，供 UI 层「起播 5 秒内 onError → 轮换下一个候选（最多 3 个）」）：
+     *  ① 歌曲自身源：快 CDN 源（[FAST_CDN_SOURCES]）排最前同 id 直取；慢源（netease 等）排**最后**兜底；
+     *  ② 跨源第一轮「严格同版本」候选（排序同 [orderCandidates]）；
+     *  ③ 跨源第二轮「同歌不同版本」候选（同上；与第一轮去重）。
+     * 只做搜索与过滤，**不解析直链** —— URL 由 UI 层按需经 [candidateUrl] 解析，
+     * 坏候选秒死轮换时才花下一次请求。
+     */
+    suspend fun resolvePlayCandidates(
+        songId: String,
+        name: String,
+        artist: String,
+        knownSource: String,
+        durationSec: Long = 0L,
+    ): List<PlayCandidate> = withContext(Dispatchers.IO) {
+        val out = ArrayList<PlayCandidate>()
+        if (name.isBlank()) return@withContext out
+        val own = knownSource.trim().lowercase()
+        val seen = HashSet<String>()
+        fun push(id: String, src: String, n: String) {
+            if (id.isBlank() || src.isBlank()) return
+            val k = src + "|" + id
+            if (seen.add(k)) out.add(PlayCandidate(id, src, n))
+        }
+        // ① 自身源（快 CDN 直取排最前）
+        if (own.isNotBlank() && songId.isNotBlank() && own in FAST_CDN_SOURCES) push(songId, own, name)
+        val target = discoverTargetDurationSec(songId, name, artist, own, durationSec)
+        val others = PREFERRED_SOURCES.filter { it != own }
+        // 起播要快：候选池只用前 2 个关键词（全名+歌手 / 纯歌名），源间并行已覆盖大部分场景
+        val keywords = strictSearchKeywords(name, artist).take(2)
+        if (keywords.isNotEmpty()) {
+            val pool = collectStrictCandidates(name, artist, target, others, keywords)
+            val baseKey = songTitleKey(name.substringBefore("/"))
+            val r1 = orderCandidates(pool.values.filter { isStrictSameSong(it.song, name, artist, target) })
+            val r1Keys = HashSet<String>().also { s -> r1.forEach { s.add(it.src + "|" + it.song.id) } }
+            val r2 = orderCandidates(
+                pool.values.filter {
+                    val k = it.src + "|" + it.song.id
+                    k !in r1Keys && isSameSongOtherVersion(it.song, artist, target, baseKey)
+                }
+            )
+            (r1 + r2).forEach { push(it.song.id, it.src, it.song.name) }
+        }
+        // 自身慢源（如 netease）排最后兜底：candidateUrl 对 netease 走串流代理优先
+        if (own.isNotBlank() && songId.isNotBlank()) push(songId, own, name)
+        out
     }
 
     /**
@@ -680,6 +943,34 @@ object MusicApiClient {
             u.takeIf { it.startsWith("http") }
         } catch (_: Exception) {
             null
+        }
+    }
+
+    /** 快 CDN 源（与 MainActivity.FAST_CDN_SOURCES 口径一致）：自身源同 id 直取排最前。 */
+    private val FAST_CDN_SOURCES = setOf("kuwo", "migu", "bilibili")
+
+    /**
+     * 后端串流代理地址（swagger `/api/v1/music/stream`：服务端取流转发，解决防盗链/跨域，
+     * 返回 audio/mpeg）。对网易电台/小众内容尤其关键：`/music/url` 给的直链常秒死，
+     * 而代理在服务端拉流（实测同一首歌代理能稳定返回完整音频）。
+     */
+    private fun streamProxyUrl(id: String, source: String): String? {
+        if (id.isBlank()) return null
+        if (source.equals("archive", ignoreCase = true) || id.startsWith("ia:")) return null
+        val src = source.ifBlank { "netease" }
+        return buildUrl(baseUrl, "/api/v1/music/stream", listOf("id" to id, "source" to src))
+    }
+
+    /**
+     * 候选起播地址：netease 走**串流代理优先**（客户端直连网易 CDN 慢、电台/小众直链秒死），
+     * 其它源**直链优先**（快 CDN 亚秒出声）、代理兜底。两者都拿不到返回 null。
+     */
+    suspend fun candidateUrl(id: String, source: String): String? = withContext(Dispatchers.IO) {
+        val src = source.trim().lowercase()
+        if (src == "netease") {
+            streamProxyUrl(id, src) ?: tryResolveUrl(id, src)
+        } else {
+            tryResolveUrl(id, src) ?: streamProxyUrl(id, src)
         }
     }
 

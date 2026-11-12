@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <unordered_set>
 
 namespace {
 
@@ -741,6 +742,113 @@ Java_com_HyperX_MI_Na_native_NativeBridge_nativeDedupKey(
     };
     const std::string key = dedupKeyCpp(getStr(jname), getStr(jartist), getStr(jalbum));
     return env->NewStringUTF(key.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// nativeMergeDedup(names, artists, albums) -> 逐条「是否保留」
+// 搜索合并语义：dedupKey 首现胜出（同键后续行丢弃），行顺序 = 调用方收集顺序
+// （源顺序 → 源内顺序，与原逐条 containsKey+put 完全同序）。
+// ---------------------------------------------------------------------------
+JNIEXPORT jbooleanArray JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeMergeDedup(
+        JNIEnv* env, jobject /*thiz*/,
+        jobjectArray jnames, jobjectArray jartists, jobjectArray jalbums) {
+    if (jnames == nullptr || jartists == nullptr || jalbums == nullptr) return nullptr;
+    std::vector<std::string> names, artists, albums;
+    fillStringVec(env, jnames, &names);
+    fillStringVec(env, jartists, &artists);
+    fillStringVec(env, jalbums, &albums);
+    const jsize n = static_cast<jsize>(names.size());
+    if (static_cast<jsize>(artists.size()) != n || static_cast<jsize>(albums.size()) != n)
+        return nullptr;
+
+    jbooleanArray outArr = env->NewBooleanArray(n);
+    if (outArr == nullptr) return nullptr;
+    if (n > 0) {
+        std::unordered_set<std::string> seen;
+        seen.reserve(static_cast<size_t>(n) * 2);
+        std::vector<jboolean> flags(static_cast<size_t>(n));
+        for (jsize k = 0; k < n; ++k) {
+            const size_t kk = static_cast<size_t>(k);
+            const std::string key = dedupKeyCpp(names[kk], artists[kk], albums[kk]);
+            flags[kk] = seen.insert(key).second ? JNI_TRUE : JNI_FALSE;  // 首次出现 = 保留
+        }
+        env->SetBooleanArrayRegion(outArr, 0, n, flags.data());
+    }
+    return outArr;
+}
+
+// ---------------------------------------------------------------------------
+// nativeParseVersionTag(name, album) -> 版本 tag（"" = 原唱/无版本修饰）
+// 与 DiscoverScreen.parseVersionTag 逐字一致；独立暴露（dedupKey/junkFlags
+// 内部复用同一实现），供单条调用与一致性验证。
+// ---------------------------------------------------------------------------
+JNIEXPORT jstring JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeParseVersionTag(
+        JNIEnv* env, jobject /*thiz*/, jstring jname, jstring jalbum) {
+    auto getStr = [env](jstring js) -> std::string {
+        if (js == nullptr) return std::string();
+        const char* raw = env->GetStringUTFChars(js, nullptr);
+        const jsize blen = env->GetStringUTFLength(js);
+        std::string s;
+        if (raw != nullptr) {
+            s.assign(raw, static_cast<size_t>(blen));
+            env->ReleaseStringUTFChars(js, raw);
+        }
+        return s;
+    };
+    const std::string tag = parseVersionTagCpp(getStr(jname), getStr(jalbum));
+    return env->NewStringUTF(tag.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// nativeParseLrcFull(lrc) -> Object[2]{ String[] 文本（按时间稳定排序）, int[] 毫秒 }
+// 与 nativeParseLrc 同一解析/排序，但不再逐条格式化 "mm:ss.xx\t" —— 调用方
+// 拿到 (文本, 毫秒) 平行数组后零解析直接进 candidates/times（消灭 entryTime 热循环）。
+// 毫秒值上限 99:59.99 ≈ 5.99e6 < 2^31，jint 安全。
+// ---------------------------------------------------------------------------
+JNIEXPORT jobjectArray JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeParseLrcFull(
+        JNIEnv* env, jobject /*thiz*/, jstring jlrc) {
+    std::string s;
+    if (jlrc != nullptr) {
+        const char* raw = env->GetStringUTFChars(jlrc, nullptr);
+        if (raw != nullptr) {
+            const jsize blen = env->GetStringUTFLength(jlrc);
+            s.assign(raw, static_cast<size_t>(blen));
+            env->ReleaseStringUTFChars(jlrc, raw);
+        }
+    }
+
+    std::vector<LrcEntry> entries;
+    forEachLine(s, [&](const std::string& line) { feedLine(line, &entries); });
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const LrcEntry& a, const LrcEntry& b) { return a.first < b.first; });
+
+    jclass objCls = env->FindClass("java/lang/Object");
+    jclass strCls = env->FindClass("java/lang/String");
+    if (objCls == nullptr || strCls == nullptr) return nullptr;
+    jobjectArray outer = env->NewObjectArray(2, objCls, nullptr);
+    if (outer == nullptr) return nullptr;
+    jobjectArray texts = env->NewObjectArray(static_cast<jsize>(entries.size()), strCls, nullptr);
+    jintArray times = env->NewIntArray(static_cast<jsize>(entries.size()));
+    if (texts == nullptr || times == nullptr) return nullptr;
+
+    std::vector<jint> tv(entries.size());
+    for (size_t k = 0; k < entries.size(); ++k) {
+        jstring js = env->NewStringUTF(entries[k].second.c_str());
+        if (js != nullptr) {
+            env->SetObjectArrayElement(texts, static_cast<jsize>(k), js);
+            env->DeleteLocalRef(js);
+        }
+        tv[k] = static_cast<jint>(entries[k].first);
+    }
+    env->SetIntArrayRegion(times, 0, static_cast<jsize>(entries.size()), tv.data());
+    env->SetObjectArrayElement(outer, 0, texts);
+    env->SetObjectArrayElement(outer, 1, times);
+    env->DeleteLocalRef(texts);
+    env->DeleteLocalRef(times);
+    return outer;
 }
 
 }  // extern "C"
