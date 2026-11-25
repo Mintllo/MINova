@@ -20,6 +20,12 @@
 
 ## 预览
 
+![双风格](preview/02_双风格.png)
+
+![三平台导入](preview/03_三平台导入.png)
+
+![全部免费](preview/04_全部免费.png)
+
 ![全新3D歌单](preview/02_全新3D歌单.png)
 
 ![3D歌单来源](preview/03_3D歌单_来源Current.png)
