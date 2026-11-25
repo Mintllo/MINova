@@ -1,0 +1,364 @@
+// Ported from CurrentMusicX (GPL-3.0) - https://github.com/bileizhen/CurrentMusicX
+// original file: PlayerControls.kt (verbatim implementation)
+package com.HyperX.MI.Na.cmx
+
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
+import com.HyperX.MI.Na.R
+import com.HyperX.MI.Na.TadpoleWaveSlider
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.*
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.IntSize
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.distinctUntilChanged
+import top.yukonga.miuix.kmp.basic.Text
+
+internal data class PlayerButtonVisual(val pressed: Boolean, val scale: Float, val glyphProgress: Float, val alpha: Float)
+internal val PlayerButtonVisuals = SemanticsPropertyKey<PlayerButtonVisual>("PlayerButtonVisuals")
+internal val PlayerBufferedProgress = SemanticsPropertyKey<Float>("PlayerBufferedProgress")
+internal data class PlayerSeekVisual(val pressed: Boolean, val dragging: Boolean, val thicknessDp: Float)
+internal val PlayerSeekVisuals = SemanticsPropertyKey<PlayerSeekVisual>("PlayerSeekVisuals")
+
+/** Keep 48dp touch targets while grouping the secondary actions near the center. */
+@Composable internal fun PlayerFunctionBar(modifier: Modifier = Modifier, actionCount: Int = 3,
+    transportAligned: Boolean = false, content: @Composable RowScope.() -> Unit) {
+    BoxWithConstraints(modifier.fillMaxWidth().then(if (transportAligned) Modifier.padding(horizontal = 8.dp) else Modifier)
+        .height(56.dp).testTag("player_function_bar")) {
+        val gap = if (transportAligned) 0.dp else if (actionCount <= 3) 24.dp
+            else ((maxWidth - 48.dp * actionCount) / (actionCount - 1)).coerceIn(0.dp, 12.dp)
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically, content = content)
+    }
+}
+
+@Composable internal fun PlayerTransport(vm: PlayerViewModel, onToggle: () -> Unit,
+    compact: Boolean = false, quality: (@Composable () -> Unit)? = null,
+    leadingAction: (@Composable () -> Unit)? = null, trailingAction: (@Composable () -> Unit)? = null) {
+    val state by vm.state.collectAsStateWithLifecycle()
+    val queue by vm.queue.collectAsStateWithLifecycle()
+    val seekTint by rememberPlayerSeekTint(queue.current?.cover.orEmpty())
+    val actions by vm.actions.collectAsStateWithLifecycle()
+    val currentMatches = state.song?.let { it.id == queue.current?.id && it.musicSource == queue.current?.musicSource &&
+        it.privateIdentity == queue.current?.privateIdentity } == true
+    val knownDuration = state.durationMs.takeIf { it > 0 && currentMatches } ?: queue.current?.durationMs ?: 0
+    val enabled = state.canControlPlayback && queue.current != null
+    var drag by remember(queue.current?.id) { mutableStateOf<Float?>(null) }
+    val position = drag?.let { (it * knownDuration).toLong() } ?: state.positionMs
+    val progress: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth()) {
+            key(queue.current?.id) { TadpoleWaveSlider(drag ?: (state.positionMs.toFloat() / knownDuration.coerceAtLeast(1)).coerceIn(0f, 1f),
+                onValueChange = { drag = it },
+                onValueChangeFinished = {
+                    drag?.let { target -> vm.player.seek((target * knownDuration).toLong()) }
+                    drag = null
+                },
+                activeColor = seekTint,
+                enabled = enabled && knownDuration > 0) }
+            Box(Modifier.fillMaxWidth()) {
+                Text(formatPlayerTime(position), Modifier.align(Alignment.CenterStart),
+                    fontSize = 11.sp, color = Color.White.copy(alpha = .48f))
+                quality?.let { entry ->
+                    Box(Modifier.align(Alignment.Center).fillMaxWidth(.5f), contentAlignment = Alignment.Center) { entry() }
+                }
+                Text("−" + formatPlayerTime((knownDuration - position).coerceAtLeast(0)), Modifier.align(Alignment.CenterEnd),
+                    fontSize = 11.sp, color = Color.White.copy(alpha = .48f))
+            }
+        }
+    }
+    val buttons: @Composable () -> Unit = {
+        Row(Modifier.fillMaxWidth().padding(top = if (compact) 6.dp else 12.dp), horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically) {
+            leadingAction?.invoke()
+            val transportSlot = if (leadingAction != null || trailingAction != null) Modifier.weight(1f) else Modifier
+            PlayerTransportButton("上一首", { vm.player.previous() }, transportSlot, enabled = enabled, direction = -1, compact = compact)
+            PlayerTransportButton(if (state.showPause) "暂停" else "播放", onToggle,
+                transportSlot.testTag("player_toggle"), enabled, state.showPause, compact = compact)
+            PlayerTransportButton("下一首", { vm.player.next() }, transportSlot, enabled = enabled, direction = 1, compact = compact)
+            trailingAction?.invoke()
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp).testTag("player_transport")) {
+        progress(); buttons()
+        // A fixed status slot keeps the controls still when buffering or permission changes.
+        Box(Modifier.fillMaxWidth().height(if (compact) 18.dp else 22.dp), contentAlignment = Alignment.Center) {
+            val message = when {
+                state.error != null -> state.error
+                actions.error != null -> actions.error
+                !state.canControlPlayback -> "播放由房主或管理员控制"
+                state.resolving -> "正在加载音源…"
+                state.loading -> "正在准备播放…"
+                else -> null
+            }
+            message?.let { Text(it, fontSize = 11.sp, color = Color.White.copy(alpha = .55f), maxLines = 1) }
+        }
+    }
+}
+
+@Composable internal fun PlayerSeekBar(value: Float, enabled: Boolean, onPreview: (Float) -> Unit,
+    onSeek: (Float) -> Unit, onCancel: () -> Unit, modifier: Modifier = Modifier, bufferedValue: Float = 0f,
+    chorusSegments: List<ChorusSegment> = emptyList(), durationMs: Long = 0, tint: Color = Color.White) {
+    val chorus = remember(chorusSegments, durationMs) { playerChorusSegments(chorusSegments, durationMs) }
+    val chorusDescription = remember(chorus) {
+        chorus.joinToString("；") { "高潮 ${formatPlayerTime(it.startMs)}–${formatPlayerTime(it.endMs)}" }
+    }
+    val preview by rememberUpdatedState(onPreview)
+    val seek by rememberUpdatedState(onSeek)
+    val cancel by rememberUpdatedState(onCancel)
+    val progress = value.takeIf(Float::isFinite)?.coerceIn(0f, 1f) ?: 0f
+    val currentProgress by rememberUpdatedState(progress)
+    val buffer = bufferedValue.takeIf(Float::isFinite)?.coerceIn(0f, 1f) ?: 0f
+    var pressed by remember { mutableStateOf(false) }
+    var dragging by remember { mutableStateOf(false) }
+    var target by remember { mutableFloatStateOf(progress) }
+    var bounds by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+    val chorusTracks = remember(chorus, durationMs, bounds.width, density) {
+        playerSeekChorusTracks(chorus, durationMs, bounds.width.toFloat(), with(density) { 10.dp.toPx() })
+    }
+    val positionMs = (if (pressed) target else progress).toDouble() * durationMs
+    val inChorus = chorus.any { positionMs >= it.startMs && positionMs < it.endMs }
+    val chorusGlow by animateFloatAsState(if (inChorus) 1f else 0f, tween(280), label = "seek chorus colour")
+    val glowTint = lerp(tint, PlayerSeekChorusGold, chorusGlow)
+    val glow = remember(glowTint) { PlayerSeekGlow(glowTint) }
+    val thickness = animateFloatAsState(if (dragging) 6f else 4f,
+        tween(if (dragging) 220 else 280, easing = LinearEasing), label = "seek press")
+    val glowAlpha = animateFloatAsState(if (enabled && !dragging) 1f else 0f,
+        tween(if (dragging || !enabled) 220 else 280, easing = LinearEasing), label = "seek glow visibility")
+    val buffered = animateFloatAsState(buffer, tween(180), label = "audio buffer progress")
+    Canvas(modifier.fillMaxWidth().height(34.dp).onSizeChanged { bounds = it }.testTag("player_seek").semantics {
+        progressBarRangeInfo = ProgressBarRangeInfo(if (pressed) target else progress, 0f..1f)
+        contentDescription = "播放进度"
+        this[PlayerBufferedProgress] = buffer
+        this[PlayerSeekVisuals] = PlayerSeekVisual(pressed, dragging, thickness.value)
+        stateDescription = "已加载 ${(buffer * 100).toInt()}%" + if (chorus.isEmpty()) "" else "；$chorusDescription"
+        if (enabled) setProgress {
+            if (!it.isFinite()) false else { seek(it.coerceIn(0f, 1f)); true }
+        } else disabled()
+    }.pointerInput(enabled, bounds) {
+        if (!enabled || size.width <= 0) return@pointerInput
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            if (down.isConsumed) return@awaitEachGesture
+            val width = size.width.toFloat()
+            val initial = currentProgress
+            val slop = viewConfiguration.touchSlop
+            var previousX = down.position.x
+            var committed = false
+            pressed = true
+            target = initial
+            // Freeze the preview where playback was when the finger landed, never at the touch X.
+            preview(target)
+            try {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    if (change.isConsumed || event.changes.any { it.id != down.id && it.pressed }) break
+                    val dx = change.position.x - down.position.x
+                    val dy = change.position.y - down.position.y
+                    if (!change.pressed) {
+                        val quickTap = !dragging && change.uptimeMillis - down.uptimeMillis < viewConfiguration.longPressTimeoutMillis &&
+                            kotlin.math.abs(dx) <= slop && kotlin.math.abs(dy) <= slop &&
+                            change.position.x in 0f..width && change.position.y in 0f..size.height.toFloat()
+                        if (dragging || quickTap) {
+                            // A short tap retains direct seeking; holding still only reveals the track.
+                            change.consume()
+                            committed = true
+                            seek(if (dragging) target else (change.position.x / width).coerceIn(0f, 1f))
+                        }
+                        break
+                    }
+                    if (!dragging) {
+                        if (kotlin.math.abs(dy) > slop && kotlin.math.abs(dy) >= kotlin.math.abs(dx)) break
+                        if (kotlin.math.abs(dx) > slop) {
+                            dragging = true
+                            target = (initial + dx / width).coerceIn(0f, 1f)
+                        } else if (change.position.x !in 0f..width || change.position.y !in 0f..size.height.toFloat()) break
+                    } else {
+                        // Accumulate clamped deltas so reversing at either edge responds immediately.
+                        target = (target + (change.position.x - previousX) / width).coerceIn(0f, 1f)
+                    }
+                    previousX = change.position.x
+                    if (dragging) { change.consume(); preview(target) }
+                    // Leave a vertical gesture available to the surrounding player/pager.
+                    val final = awaitPointerEvent(PointerEventPass.Final)
+                    if (!dragging && final.changes.firstOrNull { it.id == down.id }?.isConsumed == true) break
+                }
+            } finally {
+                // Also runs on disable, a new track, rotation or disposal of the player.
+                pressed = false
+                dragging = false
+                if (!committed) cancel()
+            }
+        }
+    }) {
+        val y = size.height / 2
+        val end = size.width * if (pressed) target else progress
+        val stroke = thickness.value.dp.toPx()
+        val ink = if (enabled) tint else Color.White.copy(alpha = .28f)
+        if (glowAlpha.value > 0f) with(glow) { drawHalo(end, stroke, glowAlpha.value) }
+        drawLine(Color.White.copy(alpha = .18f), Offset(0f, y), Offset(size.width, y), stroke, StrokeCap.Round)
+        if (buffered.value > 0f) drawLine(Color.White.copy(alpha = .42f), Offset(0f, y),
+            Offset(size.width * buffered.value, y), stroke, StrokeCap.Round)
+        if (end > 0f) drawLine(ink, Offset(0f, y), Offset(end, y), stroke, StrokeCap.Round)
+        // Draw above the buffer/progress so markers remain visible after playback passes them.
+        // Distinct played/unplayed shades preserve the playhead position inside a chorus.
+        chorusTracks.forEach { track -> with(track) { draw(end, stroke, enabled) } }
+        // Continue the highlight through the gold section and rounded cap without a separate white tip.
+        if (enabled) with(glow) { drawHighlight(end, stroke) }
+    }
+}
+
+@Composable internal fun PlayerTransportButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier,
+    enabled: Boolean = true, playing: Boolean = false, direction: Int = 0, compact: Boolean = false) {
+    val interactions = remember { MutableInteractionSource() }
+    // 真液态（对齐排序芯片）：ElasticPress 拽动果冻 + 玻璃半透明白 .14 面 + 白 .26 细描边 + 按压高光
+    val pressS = com.HyperX.MI.Na.nativeui.rememberElasticPressState()
+    val jellyS = remember { Animatable(1f) }
+    LaunchedEffect(pressS) {
+        snapshotFlow { pressS.amount > .45f }.distinctUntilChanged().collect { down ->
+            if (down) jellyS.animateTo(.92f, spring(dampingRatio = .62f, stiffness = 620f))
+            else {
+                jellyS.animateTo(1.06f, spring(dampingRatio = .38f, stiffness = 380f))
+                jellyS.animateTo(1f, spring(dampingRatio = .55f, stiffness = 300f))
+            }
+        }
+    }
+    val pressed = pressS.amount > .45f
+    val glyph = animateFloatAsState(if (playing) 1f else 0f, tween(180, easing = LinearEasing), label = "play pause glyph")
+    Box(modifier.size(if (compact) 48.dp else 68.dp).clickable(enabled = enabled, role = Role.Button, interactionSource = interactions,
+        indication = null, onClick = onClick).semantics {
+            contentDescription = label; if (!enabled) disabled()
+            this[PlayerButtonVisuals] = PlayerButtonVisual(pressed, jellyS.value, glyph.value, if (enabled) 1f else .28f)
+        }, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(if (compact) 48.dp else 68.dp).graphicsLayer {
+            val amount = pressS.amount.coerceIn(0f, 1f)
+            val net = jellyS.value / (1f + amount * .08f)
+            scaleX = net; scaleY = net
+            translationX = pressS.pull.x * .3f
+            translationY = pressS.pull.y * .3f
+        }
+            .clip(CircleShape)
+            .drawBehind { if (pressS.amount > 0f) drawCircle(Color.White.copy(alpha = .06f * pressS.amount.coerceIn(0f, 1f))) },
+            contentAlignment = Alignment.Center) {
+        Box(Modifier.size(if (compact) { if (direction == 0) 32.dp else 26.dp } else if (direction == 0) 40.dp else 30.dp).graphicsLayer {
+            translationX = direction * 3.dp.toPx() * pressS.amount.coerceIn(0f, 1f)
+        }) {
+            val ink = Color.White.copy(alpha = if (enabled) 1f else .28f)
+            if (direction == 0) {
+                PlayerSharedControlIcon(PlayerSharedControl.TOGGLE, ink, Modifier.fillMaxSize(), playing = playing)
+            } else Image(painterResource(if (direction < 0) R.drawable.player_symbol_skip_previous_fill1 else R.drawable.player_symbol_skip_next_fill1),
+                null, Modifier.fillMaxSize(), colorFilter = ColorFilter.tint(ink))
+            }
+        }
+    }
+}
+
+internal enum class PlayerIcon { COLLAPSE, MORE, SHARE, EFFECTS, LYRICS, QUEUE, LIKE, COMMENT, ALARM, REPEAT, REPEAT_ONE, SHUFFLE, HEART_MODE }
+
+@Composable internal fun PlayerIconButton(icon: PlayerIcon, label: String, onClick: () -> Unit,
+    modifier: Modifier = Modifier, selected: Boolean = false, count: Long? = null, countLabel: String? = null,
+    showCount: Boolean = false,
+    enabled: Boolean = true, loading: Boolean = false, onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String = "选择其他歌单") {
+    val interactions = remember { MutableInteractionSource() }
+    // 真液态（对齐排序芯片）：ElasticPress 拽动果冻 + 玻璃半透明白 .14 面 + 白 .26 细描边 + 按压高光
+    val pressS = com.HyperX.MI.Na.nativeui.rememberElasticPressState()
+    val jellyS = remember { Animatable(1f) }
+    LaunchedEffect(pressS) {
+        snapshotFlow { pressS.amount > .45f }.distinctUntilChanged().collect { down ->
+            if (down) jellyS.animateTo(.92f, spring(dampingRatio = .62f, stiffness = 620f))
+            else {
+                jellyS.animateTo(1.06f, spring(dampingRatio = .38f, stiffness = 380f))
+                jellyS.animateTo(1f, spring(dampingRatio = .55f, stiffness = 300f))
+            }
+        }
+    }
+    val pressed = pressS.amount > .45f
+    val opacity = animateFloatAsState(if (selected) 1f else .65f, tween(160), label = "player action selection")
+    val rotation = if (loading) rememberInfiniteTransition(label = "action loading").animateFloat(0f, 360f,
+        infiniteRepeatable(tween(900, easing = LinearEasing)), label = "action spinner").value else 0f
+    Box(modifier.size(48.dp).combinedClickable(enabled = enabled, role = Role.Button, interactionSource = interactions,
+        indication = null, onClick = onClick, onLongClick = onLongClick,
+        onLongClickLabel = if (onLongClick != null) onLongClickLabel else null).semantics {
+            contentDescription = label + (countLabel ?: count?.toString())?.let { "，数量 $it" }.orEmpty(); this.selected = selected
+            if (!enabled) disabled()
+            this[PlayerButtonVisuals] = PlayerButtonVisual(pressed, jellyS.value, 0f, opacity.value)
+        }, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(48.dp).graphicsLayer {
+            val amount = pressS.amount.coerceIn(0f, 1f)
+            val net = jellyS.value / (1f + amount * .08f)
+            scaleX = net; scaleY = net
+            translationX = pressS.pull.x * .3f
+            translationY = pressS.pull.y * .3f
+        }
+            .clip(CircleShape)
+            .drawBehind { if (pressS.amount > 0f) drawCircle(Color.White.copy(alpha = .06f * pressS.amount.coerceIn(0f, 1f))) },
+            contentAlignment = Alignment.Center) {
+        val ink = (if (icon == PlayerIcon.LIKE && selected) Color(0xFFFF647C) else Color.White)
+            .copy(alpha = opacity.value * if (enabled) 1f else .4f)
+        val iconModifier = Modifier.size(24.dp)
+        if (loading) Canvas(iconModifier) {
+            drawArc(ink, rotation, 270f, false, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
+        } else if (icon == PlayerIcon.QUEUE) {
+            PlayerSharedControlIcon(PlayerSharedControl.QUEUE, ink, iconModifier)
+        } else Image(painterResource(when (icon) {
+            PlayerIcon.COLLAPSE -> R.drawable.player_symbol_keyboard_arrow_down
+            PlayerIcon.MORE -> R.drawable.player_symbol_more_horiz
+            PlayerIcon.SHARE -> R.drawable.player_symbol_share
+            PlayerIcon.EFFECTS -> R.drawable.player_symbol_graphic_eq
+            PlayerIcon.LYRICS -> R.drawable.player_symbol_lyrics
+            PlayerIcon.QUEUE -> R.drawable.player_symbol_queue_music
+            PlayerIcon.LIKE -> if (selected) R.drawable.player_symbol_favorite_fill1 else R.drawable.player_symbol_favorite
+            PlayerIcon.COMMENT -> R.drawable.player_symbol_chat_bubble
+            PlayerIcon.ALARM -> R.drawable.player_symbol_alarm
+            PlayerIcon.REPEAT -> R.drawable.player_symbol_repeat
+            PlayerIcon.REPEAT_ONE -> R.drawable.player_symbol_repeat_one
+            PlayerIcon.SHUFFLE -> R.drawable.player_symbol_shuffle
+            PlayerIcon.HEART_MODE -> R.drawable.player_symbol_ecg_heart
+        }), null, iconModifier, colorFilter = ColorFilter.tint(ink))
+        if (showCount) Text(countLabel ?: count?.let(::formatNeteaseCount) ?: "—", fontSize = 9.sp,
+            color = Color.White.copy(alpha = .8f), maxLines = 1,
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp).testTag("${icon.name.lowercase()}_count"))
+        }
+    }
+}
+
+internal fun formatPlayerTime(value: Long): String { val seconds = value.coerceAtLeast(0) / 1000; return "%d:%02d".format(seconds / 60, seconds % 60) }

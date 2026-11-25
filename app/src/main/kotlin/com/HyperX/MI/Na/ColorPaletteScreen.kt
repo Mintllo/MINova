@@ -185,9 +185,9 @@ fun ColorPaletteScreen(
                 )
             }
         }
-        KsuSegColumn(title = "调色板") {
+        SegColumn(title = "调色板") {
             val styles = PaletteStyle.entries
-            KsuExpressiveDropdown(
+            ExpressiveDropdown(
                 index = 0, count = 2,
                 icon = Icons.Rounded.Style,
                 title = "调色板风格",
@@ -202,7 +202,7 @@ fun ColorPaletteScreen(
             )
 
             val specs = ColorSpec.SpecVersion.entries
-            KsuExpressiveDropdown(
+            ExpressiveDropdown(
                 index = 1, count = 2,
                 icon = Icons.Rounded.DesignServices,
                 title = "色彩规范",
@@ -217,7 +217,7 @@ fun ColorPaletteScreen(
             )
         }
 
-                KsuSegColumn(title = "明暗模式") {
+                SegColumn(title = "明暗模式") {
             val options = listOf(
                 listOf(ColorMode.SYSTEM, ColorMode.MONET_SYSTEM) to "跟随系统",
                 listOf(ColorMode.LIGHT, ColorMode.MONET_LIGHT) to "浅色",
@@ -271,8 +271,8 @@ fun ColorPaletteScreen(
             }
         }
 
-                KsuSegColumn {
-            KsuExpressiveDropdown(
+                SegColumn {
+            ExpressiveDropdown(
                 index = 0, count = 1,
                 icon = Icons.Rounded.Palette,
                 title = "应用风格",
@@ -294,8 +294,8 @@ fun ColorPaletteScreen(
             )
         }
 
-                        KsuSegColumn(title = "导航栏") {
-            KsuSegSwitch(
+                        SegColumn(title = "导航栏") {
+            SegSwitch(
                 index = 0, count = 4,
                 icon = Icons.Rounded.Layers,
                 title = "液态玻璃导航栏",
@@ -308,7 +308,7 @@ fun ColorPaletteScreen(
                     viewModel.savePreferences()
                 }
             )
-            KsuSegSwitch(
+            SegSwitch(
                 index = 1, count = 4,
                 icon = Icons.Rounded.BlurOn,
                 title = "玻璃模糊效果",
@@ -321,7 +321,7 @@ fun ColorPaletteScreen(
                     viewModel.savePreferences()
                 }
             )
-            KsuSegSwitch(
+            SegSwitch(
                 index = 2, count = 4,
                 icon = Icons.Rounded.Label,
                 title = "显示文字标签",
@@ -332,7 +332,7 @@ fun ColorPaletteScreen(
                     viewModel.savePreferences()
                 }
             )
-                KsuExpressiveDropdown(
+                ExpressiveDropdown(
                     index = 3, count = 4,
                     icon = Icons.Rounded.WaterDrop,
                     title = "透明度",
@@ -351,7 +351,7 @@ fun ColorPaletteScreen(
 }
 
 @Composable
-internal fun KsuSegTitle(text: String) {
+internal fun SegTitle(text: String) {
     Text(
         text,
         fontSize = 14.sp,
@@ -362,7 +362,7 @@ internal fun KsuSegTitle(text: String) {
 }
 
 @Composable
-internal fun KsuSegColumn(title: String = "", content: @Composable ColumnScope.() -> Unit) {
+internal fun SegColumn(title: String = "", content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -383,7 +383,8 @@ internal fun KsuSegColumn(title: String = "", content: @Composable ColumnScope.(
     }
 }
 
-internal fun ksuSegShape(index: Int, count: Int): RoundedCornerShape {
+internal fun segShape(index: Int, count: Int): RoundedCornerShape {
+    // MD3 设置紧凑分组：首行上圆角、尾行下圆角、中间小圆角，整组一体
     val outer = 16.dp
     val inner = 4.dp
     val top = if (index == 0) outer else inner
@@ -392,7 +393,7 @@ internal fun ksuSegShape(index: Int, count: Int): RoundedCornerShape {
 }
 
 @Composable
-internal fun KsuSegRow(
+internal fun SegRow(
     index: Int,
     count: Int,
     icon: ImageVector,
@@ -404,10 +405,10 @@ internal fun KsuSegRow(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(ksuSegShape(index, count))
+            .clip(segShape(index, count))
             .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier),
         color = MaterialTheme.colorScheme.surfaceBright,
-        shape = ksuSegShape(index, count)
+        shape = segShape(index, count)
     ) {
         Row(
             modifier = Modifier
@@ -430,7 +431,7 @@ internal fun KsuSegRow(
 }
 
 @Composable
-internal fun KsuSegSwitch(
+internal fun SegSwitch(
     index: Int,
     count: Int,
     icon: ImageVector,
@@ -453,7 +454,7 @@ internal fun KsuSegSwitch(
 }
 
 @Composable
-internal fun KsuSegClick(
+internal fun SegClick(
     index: Int,
     count: Int,
     icon: ImageVector,
@@ -473,7 +474,7 @@ internal fun KsuSegClick(
 }
 
 @Composable
-internal fun KsuExpressiveDropdown(
+internal fun ExpressiveDropdown(
     index: Int,
     count: Int,
     icon: ImageVector,
@@ -499,7 +500,7 @@ internal fun KsuExpressiveDropdown(
 }
 
 @Composable
-private fun KsuSectionTitle(text: String) {
+private fun SegSectionTitle(text: String) {
     Text(
         text,
         fontSize = 13.sp,
@@ -510,7 +511,7 @@ private fun KsuSectionTitle(text: String) {
 }
 
 @Composable
-private fun KsuSwitchRow(
+private fun SegSwitchRow(
     icon: @Composable () -> Unit,
     title: String,
     summary: String,
@@ -542,7 +543,7 @@ private fun KsuSwitchRow(
 }
 
 @Composable
-private fun KsuNavRow(
+private fun SegNavRow(
     icon: @Composable () -> Unit,
     title: String,
     summary: String,

@@ -526,6 +526,218 @@ std::string dedupKeyCpp(const std::string& name, const std::string& artist,
     return k;
 }
 
+// ===========================================================================
+// 播放页视觉热点路径（CurrentMusicX ArtworkGlowPalette / PlayerBackdrop /
+// PlayerSeekGlow 的逐像素循环 C++ 版）。Kotlin 入口见 NativeBridge。
+// 本节为像素/浮点纯计算，无字符串约定；浮点逐位对齐 Kotlin Float 语义
+// （-ffp-contract=off 全局生效，kotlin.math.exp(Float)=Math.exp(double).toFloat，
+//  这里同样以 double 调 libm exp 再转 float）。
+// ===========================================================================
+namespace {
+
+// 等价 Kotlin paletteChroma(color: Int)：RGB 通道极差。
+inline int paletteChromaCpp(unsigned int color) {
+    const int r = (int)((color >> 16) & 255u), g = (int)((color >> 8) & 255u), b = (int)(color & 255u);
+    const int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    const int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    return mx - mn;
+}
+
+struct PaletteCandidate { int argb; int population; };
+
+// 等价 CmxPlayerUi.paletteFromPixels（CurrentMusicX ArtworkGlowPalette）：
+// 16 级/通道分桶 → counts*(0.25+chroma) 稳定降序 → 饱和度/亮度提升 →
+// 主色 = 首候选（chroma<32 时回退首个 chroma>=32 候选）；辅色 = 与主色
+// 三通道差和 >110 的候选；无候选 → 中性灰 (0xff9da9b6, 0xffb3a7b6)。
+// 返回 false 表示走了中性灰兜底。
+bool paletteFromPixelsCpp(const jint* pixels, jsize n, jint* outPrimary, jint* outSecondary) {
+    const jint kNeutralPrimary = (jint)0xff9da9b6u;
+    const jint kNeutralSecondary = (jint)0xffb3a7b6u;
+    long long counts[4096] = {0};
+    long long red[4096] = {0}, green[4096] = {0}, blue[4096] = {0};
+    for (jsize k = 0; k < n; ++k) {
+        const unsigned int color = (unsigned int)pixels[k];
+        if ((color >> 24) < 128u) continue;                       // Kotlin: (color ushr 24) < 128
+        const int r = (int)((color >> 16) & 255u);
+        const int g = (int)((color >> 8) & 255u);
+        const int b = (int)(color & 255u);
+        const int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        const int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        if (mx < 28 || mn > 225) continue;                        // 过暗/过亮剔除
+        const int bucket = ((r / 16) << 8) | ((g / 16) << 4) | (b / 16);
+        counts[bucket]++; red[bucket] += r; green[bucket] += g; blue[bucket] += b;
+    }
+    std::vector<int> order;
+    order.reserve(4096);
+    for (int i = 0; i < 4096; ++i) if (counts[i] > 0) order.push_back(i);
+    if (order.empty()) {
+        *outPrimary = kNeutralPrimary;
+        *outSecondary = kNeutralSecondary;
+        return false;
+    }
+    // Kotlin sortedByDescending = 稳定降序（同分保持索引升序）。
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+        const float ma = (float)std::max(std::max(red[a], green[a]), blue[a]);
+        const float na = (float)std::min(std::min(red[a], green[a]), blue[a]);
+        const float mb = (float)std::max(std::max(red[b], green[b]), blue[b]);
+        const float nb = (float)std::min(std::min(red[b], green[b]), blue[b]);
+        const float chromaA = ma - na != 0.0f ? (ma - na) / (float)(counts[a] * 255) : 0.0f;
+        const float chromaB = mb - nb != 0.0f ? (mb - nb) / (float)(counts[b] * 255) : 0.0f;
+        const float scoreA = (float)counts[a] * (0.25f + chromaA);
+        const float scoreB = (float)counts[b] * (0.25f + chromaB);
+        return scoreA > scoreB;
+    });
+    std::vector<PaletteCandidate> candidates;
+    candidates.reserve(order.size());
+    for (size_t k = 0; k < order.size(); ++k) {
+        const int idx = order[k];
+        const int r = (int)(red[idx] / counts[idx]);
+        const int g = (int)(green[idx] / counts[idx]);
+        const int b = (int)(blue[idx] / counts[idx]);
+        const int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        const int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        const float maxv = (float)mx;
+        const float spread = maxv - (float)mn;
+        const float saturationBoost = (spread < 12.0f) ? 1.0f : 1.12f;
+        const float brightenRaw = 205.0f / maxv;
+        const float brighten = brightenRaw > 1.0f ? brightenRaw : 1.0f;
+        auto channel = [maxv, saturationBoost, brighten](int value) -> int {
+            const float v = (maxv - (maxv - (float)value) * saturationBoost) * brighten;
+            const int iv = (int)v;                                // Kotlin .toInt() 向零截断
+            return iv < 0 ? 0 : (iv > 255 ? 255 : iv);
+        };
+        const unsigned int argb = (255u << 24) | ((unsigned)channel(r) << 16) |
+                                  ((unsigned)channel(g) << 8) | (unsigned)channel(b);
+        candidates.push_back({(int)argb, (int)counts[idx]});
+    }
+    const PaletteCandidate& leading = candidates.front();
+    const int minimumAccentPopulation = 2 > leading.population / 10 ? 2 : leading.population / 10;
+    const PaletteCandidate* dominant = &leading;
+    if (paletteChromaCpp((unsigned)leading.argb) < 32) {
+        for (const PaletteCandidate& c : candidates) {
+            if (c.population >= minimumAccentPopulation && paletteChromaCpp((unsigned)c.argb) >= 32) {
+                dominant = &c; break;
+            }
+        }
+    }
+    const int first = dominant->argb;
+    const int minimumPopulation = 2 > dominant->population / 10 ? 2 : dominant->population / 10;
+    const int leadChroma = paletteChromaCpp((unsigned)first);
+    const int minimumChroma = leadChroma < 32 ? 0 : (32 > leadChroma / 2 ? 32 : leadChroma / 2);
+    int second = first;
+    for (const PaletteCandidate& c : candidates) {
+        const unsigned int color = (unsigned)c.argb, base = (unsigned)first;
+        const int diff = std::abs((int)((color >> 16) & 255u) - (int)((base >> 16) & 255u)) +
+                         std::abs((int)((color >> 8) & 255u) - (int)((base >> 8) & 255u)) +
+                         std::abs((int)(color & 255u) - (int)(base & 255u));
+        if (c.population >= minimumPopulation && paletteChromaCpp(color) >= minimumChroma && diff > 110) {
+            second = c.argb; break;
+        }
+    }
+    *outPrimary = (jint)first;
+    *outSecondary = (jint)second;
+    return true;
+}
+
+// 等价 CmxPlayerBackdrop.blurBackgroundPixels：盒式模糊，radius clamp 1..24，
+// 整数累加/整除与 Kotlin 逐位一致。
+// ⚠️ 修正：Kotlin 版每轮垂直 pass 误读未模糊的 src（水平结果被覆盖），
+// 实际效果 = 纵向两次拖影；C++ 版修正为标准可分离盒式模糊
+// （水平→交换→垂直→交换 × 2 轮），观感对齐上游 stack blur。
+bool blurPixelsCpp(const jint* src0, jint* scratch, jint* dst, int width, int height, int radius) {
+    const int r = radius < 1 ? 1 : (radius > 24 ? 24 : radius);
+    const int div = 2 * r + 1;
+    jint* src = scratch;  // scratch 已预填原图
+    for (int round = 0; round < 2; ++round) {
+        // 水平 pass：src → dst
+        for (int y = 0; y < height; ++y) {
+            const int row = y * width;
+            int sumA = 0, sumR = 0, sumG = 0, sumB = 0;
+            for (int x = -r; x <= r; ++x) {
+                const int cx = x < 0 ? 0 : (x > width - 1 ? width - 1 : x);
+                const unsigned int c = (unsigned)src[row + cx];
+                sumA += (int)(c >> 24); sumR += (int)((c >> 16) & 255u);
+                sumG += (int)((c >> 8) & 255u); sumB += (int)(c & 255u);
+            }
+            for (int x = 0; x < width; ++x) {
+                const unsigned int o = (sumA / div) << 24 | (sumR / div) << 16 | (sumG / div) << 8 | (sumB / div);
+                dst[row + x] = (jint)o;
+                const int outX = x - r < 0 ? 0 : (x - r > width - 1 ? width - 1 : x - r);
+                const int inX = x + r + 1 > width - 1 ? width - 1 : x + r + 1;
+                const unsigned int co = (unsigned)src[row + outX];
+                const unsigned int ci = (unsigned)src[row + inX];
+                sumA += (int)(ci >> 24) - (int)(co >> 24);
+                sumR += (int)((ci >> 16) & 255u) - (int)((co >> 16) & 255u);
+                sumG += (int)((ci >> 8) & 255u) - (int)((co >> 8) & 255u);
+                sumB += (int)(ci & 255u) - (int)(co & 255u);
+            }
+        }
+        jint* t = src; src = dst; dst = t;
+        // 垂直 pass：src → dst
+        for (int x = 0; x < width; ++x) {
+            int sumA = 0, sumR = 0, sumG = 0, sumB = 0;
+            for (int y = -r; y <= r; ++y) {
+                const int cy = y < 0 ? 0 : (y > height - 1 ? height - 1 : y);
+                const unsigned int c = (unsigned)src[cy * width + x];
+                sumA += (int)(c >> 24); sumR += (int)((c >> 16) & 255u);
+                sumG += (int)((c >> 8) & 255u); sumB += (int)(c & 255u);
+            }
+            for (int y = 0; y < height; ++y) {
+                const unsigned int o = (sumA / div) << 24 | (sumR / div) << 16 | (sumG / div) << 8 | (sumB / div);
+                dst[y * width + x] = (jint)o;
+                const int outY = y - r < 0 ? 0 : (y - r > height - 1 ? height - 1 : y - r);
+                const int inY = y + r + 1 > height - 1 ? height - 1 : y + r + 1;
+                const unsigned int co = (unsigned)src[outY * width + x];
+                const unsigned int ci = (unsigned)src[inY * width + x];
+                sumA += (int)(ci >> 24) - (int)(co >> 24);
+                sumR += (int)((ci >> 16) & 255u) - (int)((co >> 16) & 255u);
+                sumG += (int)((ci >> 8) & 255u) - (int)((co >> 8) & 255u);
+                sumB += (int)(ci & 255u) - (int)(co & 255u);
+            }
+        }
+        jint* t2 = src; src = dst; dst = t2;
+    }
+    // 结果在 src；若与 scratch 不同则拷回 scratch（调用方统一从 scratch 读）。
+    if (src != scratch) std::memcpy(scratch, src, (size_t)width * (size_t)height * sizeof(jint));
+    return true;
+}
+
+// 等价 CmxPlayerUi.seekBeamMask 像素循环：384x192 高斯光束 alpha 蒙版
+// （ARGB，RGB 恒 0xFFFFFF；alpha 与 Kotlin 逐位一致——内层 Float 运算，
+//  exp 按 double 计算后转 float）。
+bool seekBeamMaskPixelsCpp(int width, int height, jint* out) {
+    const float kBeamLen = 100.0f;      // PlayerSeekGlow.kt SeekBeamLengthDp
+    const float kBeamRadius = 24.0f;    // PlayerSeekGlow.kt SeekBeamRadiusDp
+    auto smooth = [](float value) {
+        const float t = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    const float invW = 1.0f / (float)(width - 1);
+    const float invH = 1.0f / (float)(height - 1);
+    for (int index = 0, y = 0; y < height; ++y) {
+        const float fy = (float)y * invH * 2.0f - 1.0f;
+        for (int x = 0; x < width; ++x, ++index) {
+            const float fx = (float)x * invW;
+            const float behindDp = (1.0f - fx) * kBeamLen;
+            const float spreadDp = 1.1f + 0.13f * behindDp;
+            const float distance = behindDp / 28.7f;
+            const float vertical = fy * kBeamRadius / spreadDp;
+            const float arg = -0.5f * (distance * distance + vertical * vertical);
+            const float falloff = (float)exp((double)arg);
+            const float ay = fy < 0.0f ? -fy : fy;
+            const float edgeFade = smooth((1.0f - ay) / 0.16f) *
+                                   smooth(fx / 0.08f) * smooth(behindDp / 4.0f);
+            int alpha = (int)(falloff * edgeFade * 0.93f * 255.0f);
+            if (alpha < 0) alpha = 0;
+            if (alpha > 255) alpha = 255;
+            out[index] = (jint)(((unsigned)alpha << 24) | 0x00FFFFFFu);
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
 // jobjectArray<String> → vector<string>（Modified UTF-8 字节；null 元素按 ""）
 void fillStringVec(JNIEnv* env, jobjectArray arr, std::vector<std::string>* out) {
     const jsize n = env->GetArrayLength(arr);
@@ -849,6 +1061,78 @@ Java_com_HyperX_MI_Na_native_NativeBridge_nativeParseLrcFull(
     env->DeleteLocalRef(texts);
     env->DeleteLocalRef(times);
     return outer;
+}
+
+// ---------------------------------------------------------------------------
+// nativeArtworkPalette(pixels) -> IntArray[2]{ 主色 ARGB, 辅色 ARGB }
+// 封面调色板提取（ArtworkGlowPalette.paletteFromPixels 的 C++ 版）：
+// 替代 Kotlin 逐像素分桶循环（192px 封面 ≈ 3.7 万像素 × 分桶/排序）。
+// 无有效像素时返回中性灰 (0xff9da9b6, 0xffb3a7b6)，与 Kotlin Neutral 一致。
+// ---------------------------------------------------------------------------
+JNIEXPORT jintArray JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeArtworkPalette(
+        JNIEnv* env, jobject /*thiz*/, jintArray jpixels) {
+    if (jpixels == nullptr) return nullptr;
+    const jsize n = env->GetArrayLength(jpixels);
+    jint* px = static_cast<jint*>(env->GetPrimitiveArrayCritical(jpixels, nullptr));
+    if (px == nullptr) return nullptr;
+
+    jint out[2] = {0, 0};
+    paletteFromPixelsCpp(px, n, &out[0], &out[1]);
+    env->ReleasePrimitiveArrayCritical(jpixels, px, JNI_ABORT);
+
+    jintArray result = env->NewIntArray(2);
+    if (result == nullptr) return nullptr;
+    env->SetIntArrayRegion(result, 0, 2, out);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// nativeBlurPixels(pixels, width, height, radius) -> 模糊后的新像素数组
+// 播放页毛玻璃背景（PlayerBackdrop.blurBackgroundPixels 的 C++ 版）：
+// 可分离盒式模糊 2 轮（水平→垂直），替代 Kotlin 逐像素滑动窗口循环。
+// pixels.length 必须等于 width*height，否则返回 null（调用方走 Kotlin 兜底）。
+// ---------------------------------------------------------------------------
+JNIEXPORT jintArray JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeBlurPixels(
+        JNIEnv* env, jobject /*thiz*/, jintArray jpixels,
+        jint width, jint height, jint radius) {
+    if (jpixels == nullptr || width <= 0 || height <= 0 || radius < 1) return nullptr;
+    const jsize n = env->GetArrayLength(jpixels);
+    if (n != width * height) return nullptr;
+
+    jint* px = static_cast<jint*>(env->GetPrimitiveArrayCritical(jpixels, nullptr));
+    if (px == nullptr) return nullptr;
+
+    std::vector<jint> scratch(px, px + n);
+    std::vector<jint> dst(static_cast<size_t>(n));
+    blurPixelsCpp(px, scratch.data(), dst.data(), width, height, radius);
+    env->ReleasePrimitiveArrayCritical(jpixels, px, JNI_ABORT);
+
+    jintArray result = env->NewIntArray(n);
+    if (result == nullptr) return nullptr;
+    env->SetIntArrayRegion(result, 0, n, scratch.data());
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// nativeSeekBeamMask(width, height, out) -> 是否写满 out
+// 进度条光晕蒙版（PlayerSeekGlow.seekBeamMask 惰性初始化的 C++ 版）：
+// 384x192 高斯衰减，一次栅格化、GPU 染色缩放。width/height ≥ 2，
+// out.length 必须 ≥ width*height；返回写入像素数与 out.length 的较小者。
+// ---------------------------------------------------------------------------
+JNIEXPORT jboolean JNICALL
+Java_com_HyperX_MI_Na_native_NativeBridge_nativeSeekBeamMask(
+        JNIEnv* env, jobject /*thiz*/, jint width, jint height, jintArray jout) {
+    if (jout == nullptr || width < 2 || height < 2) return JNI_FALSE;
+    const jsize cap = env->GetArrayLength(jout);
+    if (cap < width * height) return JNI_FALSE;
+
+    jint* out = static_cast<jint*>(env->GetPrimitiveArrayCritical(jout, nullptr));
+    if (out == nullptr) return JNI_FALSE;
+    const bool ok = seekBeamMaskPixelsCpp(width, height, out);
+    env->ReleasePrimitiveArrayCritical(jout, out, 0);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 }  // extern "C"

@@ -81,6 +81,8 @@ import com.kyant.backdrop.highlight.Highlight
 import com.kyant.shapes.RoundedRectangle
 import com.kyant.backdrop.shadow.Shadow
 import com.kyant.shapes.Capsule
+import com.HyperX.MI.Na.stats.FootprintScreen
+import com.HyperX.MI.Na.stats.ListenStatsStore
 
 /** 本项目的开源仓库地址。 */
 private const val PROJECT_GITHUB_URL = "https://github.com/Mintllo/MINova"
@@ -173,7 +175,8 @@ fun UnloggedProfilePage(
         label = "UnloggedPage"
     ) { page ->
         when (page) {
-            "playlists" -> PlaylistScreen(viewModel = viewModel, onBack = { activePage = null }, backdrop = backdrop)
+            "playlists" -> PlaylistScreen(viewModel = viewModel, onBack = { activePage = null }, backdrop = backdrop, onOpenFootprint = { activePage = "footprint" })
+            "footprint" -> FootprintScreen(onBack = { activePage = null })
             "changelog" -> ChangelogScreen(backdrop = backdrop, onBack = { activePage = null })
             "about" -> AboutScreen(backdrop = backdrop, onBack = { activePage = null })
             "storage_manage" -> StorageManageScreen(viewModel = viewModel, backdrop = backdrop, onBack = { activePage = null })
@@ -224,6 +227,8 @@ fun UnloggedProfilePage(
                                 Icon(Icons.Rounded.OpenInNew, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                             }
                         }
+                        // 听歌足迹独立入口：本地统计未登录同样可用，直达足迹页
+                        item { FootprintEntryCard(backdrop = backdrop, onClick = { activePage = "footprint" }) }
                         if (isMd3Style) {
                                                         item {
                                 SegmentedColumn(title = "更多操作") {
@@ -272,7 +277,9 @@ fun LoggedInContent(
 ) {
     var activePage by remember { mutableStateOf<String?>(null) }
     AnimatedContent(
-        targetState = activePage,
+        // 收藏页改由下方 FoldEnterHost 统一承载折叠动效（与 custom_center/history/playlists 等子页同款），
+        // AnimatedContent 的 target 剔除 favorites，避免底层主页在收藏进场时再做一次 fade+scale。
+        targetState = activePage.takeIf { it != "favorites" },
         transitionSpec = {
             fadeIn(Motion.enter()) + scaleIn(initialScale = 0.95f, animationSpec = Motion.enter()) togetherWith
                     fadeOut(Motion.exit()) + scaleOut(targetScale = 0.95f, animationSpec = Motion.exit())
@@ -281,9 +288,9 @@ fun LoggedInContent(
     ) { page ->
         when (page) {
             "usage_limit" -> UsageLimitScreen(viewModel, onBack = { activePage = null })
-            "favorites" -> FavoritesScreen(viewModel, backdrop, onBack = { activePage = null })
-            "account_manage" -> AccountManageScreen(viewModel, currentUser, onBack = { activePage = null })
-            "playlists" -> PlaylistScreen(viewModel = viewModel, onBack = { activePage = null }, backdrop = backdrop)
+            "account_manage" -> AccountManageScreen(viewModel, currentUser, backdrop, onBack = { activePage = null })
+            "playlists" -> PlaylistScreen(viewModel = viewModel, onBack = { activePage = null }, backdrop = backdrop, onOpenFootprint = { activePage = "footprint" })
+            "footprint" -> FootprintScreen(onBack = { activePage = null })
             "changelog" -> ChangelogScreen(backdrop = backdrop, onBack = { activePage = null })
             "about" -> AboutScreen(backdrop = backdrop, onBack = { activePage = null })
             "storage_manage" -> StorageManageScreen(viewModel, backdrop, onBack = { activePage = null })
@@ -292,6 +299,13 @@ fun LoggedInContent(
                 if (page == "history") onNavigateToHistory()
                 else activePage = page
             }, onNavigateToPlaylists = onNavigateToPlaylists)
+        }
+    }
+    // 收藏页统一进场动效：420ms 折叠展开进场 + 300ms 反向折叠退场（同 MainActivity 子页 FoldEnterHost 规格）。
+    FoldEnterHost(visible = activePage == "favorites") {
+        // 收藏页自补不透明背景：FoldEnterHost 容器不再透出底层主页（用户实测变透明）
+        Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            FavoritesScreen(viewModel, backdrop, onBack = { activePage = null })
         }
     }
 }
@@ -348,8 +362,8 @@ fun MainProfilePage(
                         contentAlignment = Alignment.Center
                     ) {
                         when {
-                            avatarUri != null -> AsyncImage(avatarUri, "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
-                            !avatarUrl.isNullOrEmpty() -> AsyncImage(avatarModelUrl(avatarUrl!!), "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
+                            avatarUri != null -> FadingAsyncImage(avatarUri, "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
+                            !avatarUrl.isNullOrEmpty() -> FadingAsyncImage(avatarModelUrl(avatarUrl!!), "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
                             else -> Text((currentUser?.nickname ?: "?").take(1), fontSize = 34.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                         }
                     }
@@ -382,6 +396,8 @@ fun MainProfilePage(
                     Icon(Icons.Rounded.OpenInNew, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                 }
             }
+            // 听歌足迹独立入口：与收藏/歌单同级，不依赖歌单页（数据本地维护，未登录也可用）
+            item { FootprintEntryCard(backdrop = backdrop, onClick = { onNavigate("footprint") }) }
             if (isMd3Style) {
                                 item {
                     SegmentedColumn(title = "更多操作") {
@@ -470,13 +486,74 @@ fun ProfileGlassCard(
     }
 }
 
+/**
+ * 听歌足迹独立入口卡：主题色图标 + 今日时长摘要，账号页里与收藏/歌单同级。
+ * 数据来自 ListenStatsStore（本地统计，未登录同样可用），点击直达足迹页。
+ */
+@Composable
+fun FootprintEntryCard(
+    backdrop: Backdrop,
+    onClick: () -> Unit
+) {
+    val snap by ListenStatsStore.snapshot.collectAsState()
+    val todayKey = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
+    val todayMs = snap.perDay[todayKey] ?: 0L
+    val summary = when {
+        todayMs >= 3_600_000L -> "今日 ${todayMs / 3_600_000L} 小时 ${(todayMs % 3_600_000L) / 60_000L} 分"
+        todayMs >= 60_000L -> "今日 ${todayMs / 60_000L} 分钟"
+        todayMs > 0L -> "今日 ${todayMs / 1000L} 秒"
+        else -> "今天还没听歌"
+    }
+    ProfileGlassCard(backdrop = backdrop, onClick = onClick) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Rounded.Schedule,
+                null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "听歌足迹",
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                summary,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Icon(
+            Icons.Rounded.ChevronRight,
+            null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountManageScreen(
     viewModel: PlayerViewModel,
     currentUser: PlayerViewModel.UserInfo?,
+    backdrop: com.kyant.backdrop.Backdrop,
     onBack: () -> Unit
 ) {
+    val isMd3 = com.HyperX.MI.Na.LocalMd3Style.current
+    val glassFrost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.22f)
     val context = LocalContext.current
     val avatarUri = viewModel.avatarUri
     val avatarUrl = currentUser?.avatar
@@ -516,8 +593,16 @@ fun AccountManageScreen(
         ) {
             item {
                 Card(
-                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(viewModel.cornerRadius.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp).copy(alpha = 0.55f)),
+                    modifier = Modifier.fillMaxWidth().then(
+                        if (!isMd3) Modifier.drawBackdrop(
+                            backdrop = backdrop,
+                            shape = { RoundedCornerShape(viewModel.cornerRadius.dp) },
+                            effects = { blur(10f.dp.toPx()) },
+                            highlight = { com.kyant.backdrop.highlight.Highlight.Plain.copy(alpha = 0f) },
+                            onDrawSurface = { drawRect(glassFrost) }
+                        ) else Modifier
+                    ), shape = RoundedCornerShape(viewModel.cornerRadius.dp),
+                    colors = CardDefaults.cardColors(containerColor = if (isMd3) MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp).copy(alpha = 0.55f) else androidx.compose.ui.graphics.Color.Transparent),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
                     Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -527,8 +612,8 @@ fun AccountManageScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             when {
-                                avatarUri != null -> AsyncImage(avatarUri, "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
-                                !avatarUrl.isNullOrEmpty() -> AsyncImage(avatarModelUrl(avatarUrl!!), "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
+                                avatarUri != null -> FadingAsyncImage(avatarUri, "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
+                                !avatarUrl.isNullOrEmpty() -> FadingAsyncImage(avatarModelUrl(avatarUrl!!), "头像", Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
                                 else -> Icon(Icons.Rounded.CameraAlt, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(40.dp))
                             }
                         }
@@ -583,8 +668,16 @@ fun AccountManageScreen(
             }
             item {
                 Card(
-                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(viewModel.cornerRadius.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp).copy(alpha = 0.55f)),
+                    modifier = Modifier.fillMaxWidth().then(
+                        if (!isMd3) Modifier.drawBackdrop(
+                            backdrop = backdrop,
+                            shape = { RoundedCornerShape(viewModel.cornerRadius.dp) },
+                            effects = { blur(10f.dp.toPx()) },
+                            highlight = { com.kyant.backdrop.highlight.Highlight.Plain.copy(alpha = 0f) },
+                            onDrawSurface = { drawRect(glassFrost) }
+                        ) else Modifier
+                    ), shape = RoundedCornerShape(viewModel.cornerRadius.dp),
+                    colors = CardDefaults.cardColors(containerColor = if (isMd3) MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp).copy(alpha = 0.55f) else androidx.compose.ui.graphics.Color.Transparent),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
@@ -692,6 +785,24 @@ fun FavoritesScreen(
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    // MINova 3D 改版：顶部 3D 封面轮播（cmx/CmxCoverCarousel）
+                    // + 随机挑一首；下面的收藏列表原样保留。
+                    item(key = "fav_pick_deck") {
+                        Column(Modifier.fillMaxWidth()) {
+                            com.HyperX.MI.Na.cmx.CmxCoverCarousel(
+                                songs = filteredFavorites,
+                                isPlaying = isPlaying,
+                                playingSongId = currentSong?.id,
+                                onPlaySelected = { pickIndex ->
+                                    filteredFavorites.getOrNull(pickIndex)?.let { viewModel.playSong(it, filteredFavorites) }
+                                },
+                                dateLabel = "收藏精选 共 ${filteredFavorites.size} 首",
+                            )
+                            CmxPickOneRow(enabled = filteredFavorites.isNotEmpty()) {
+                                filteredFavorites.randomOrNull()?.let { viewModel.playSong(it, filteredFavorites) }
+                            }
+                        }
+                    }
                     itemsIndexed(
                         items = filteredFavorites,
                         key = { index, s -> "fav_${s.id}_$index" }
@@ -702,18 +813,22 @@ fun FavoritesScreen(
                             enter = fadeIn(Motion.enter()) + scaleIn(initialScale = 0.95f, animationSpec = Motion.enter()),
                             exit = fadeOut(Motion.exit()) + shrinkVertically(Motion.exit()) + scaleOut(targetScale = 0.9f, animationSpec = Motion.exit())
                         ) {
-                            SongItem(
-                                song = song,
-                                isCurrentSong = song.id == currentSong?.id,
-                                isPlaying = isPlaying,
-                                isFirst = index == 0,
-                                isLast = index == filteredFavorites.size - 1,
-                                onClick = { viewModel.playSong(song, filteredFavorites) },
-                                viewModel = viewModel,
-                                backdrop = backdrop,
-                                isInFavorites = true,
-                                onRemoveFromFavorites = { isRemoving = true }
-                            )
+                            // 列表项轻量入场（alpha+上浮 240ms）：原先 AnimatedVisibility 的 enter
+                            // 只在移除复位时触发，列表首次出现没有任何入场
+                            Box(modifier = Modifier.fillMaxWidth().listItemEnter(index)) {
+                                SongItem(
+                                    song = song,
+                                    isCurrentSong = song.id == currentSong?.id,
+                                    isPlaying = isPlaying,
+                                    isFirst = index == 0,
+                                    isLast = index == filteredFavorites.size - 1,
+                                    onClick = { viewModel.playSong(song, filteredFavorites) },
+                                    viewModel = viewModel,
+                                    backdrop = backdrop,
+                                    isInFavorites = true,
+                                    onRemoveFromFavorites = { isRemoving = true }
+                                )
+                            }
                         }
                         LaunchedEffect(isRemoving) {
                             if (isRemoving) {
@@ -880,7 +995,7 @@ fun ChangelogScreen(
                         changelogEntries().forEachIndexed { idx, entry ->
                 ChangelogItem(
                     version = "v" + entry.version + if (idx == 0) " 正式版" else "",
-                    date = mapOf("1.3.4" to "2026年11月12日 01:27", "1.3.3" to "2026年11月11日 19:41", "1.3.2" to "2026年11月8日 21:30", "1.3.1" to "2026年11月8日 18:00")[entry.version] ?: "",
+                    date = mapOf("1.3.5" to "2026年11月24日 01:24", "1.3.4" to "2026年11月12日 01:27", "1.3.3" to "2026年11月11日 19:41", "1.3.2" to "2026年11月8日 21:30", "1.3.1" to "2026年11月8日 18:00")[entry.version] ?: "",
                     changes = entry.items,
                     isLatest = idx == 0,
                     backdrop = backdrop
@@ -1353,7 +1468,7 @@ fun DevCard(avatarUrl: String, name: String, role: String, isAI: Boolean = false
             if (isAI) {
                 Icon(Icons.Rounded.SmartToy, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer))
             } else {
-                AsyncImage(model = avatarUrl, contentDescription = null, modifier = Modifier.size(40.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                FadingAsyncImage(model = avatarUrl, contentDescription = null, modifier = Modifier.size(40.dp).clip(CircleShape), contentScale = ContentScale.Crop)
             }
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -1748,7 +1863,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                 item(key = "dl_header") {
                     StorageSectionHeader(
                         title = "已下载歌曲",
-                        subtitle = "${downloadedSongs.size} 首 · ${formatFileSize(downloadSize)}",
+                        subtitle = "${downloadedSongs.size} 首 ${formatFileSize(downloadSize)}",
                         hint = if (!selectionMode) "长按歌曲进入批量管理" else null
                     )
                 }
@@ -1801,7 +1916,7 @@ fun StorageManageScreen(viewModel: PlayerViewModel, backdrop: Backdrop, onBack: 
                         Column {
                             Text("转换结果", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                             Text(
-                                "${convertedOnly.size} 个文件 · ${formatFileSize(convertedSize)}",
+                                "${convertedOnly.size} 个文件 ${formatFileSize(convertedSize)}",
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1876,7 +1991,7 @@ private fun StorageStatsContent(
         Spacer(Modifier.height(10.dp))
         Text(formatFileSize(totalSize), fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
         Text(
-            if (totalSize > 0) "已下载 $songCount 首歌曲 · 转换文件 $convertedCount 个" else "已下载 0 首歌曲",
+            if (totalSize > 0) "已下载 $songCount 首歌曲 转换文件 $convertedCount 个" else "已下载 0 首歌曲",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -2003,7 +2118,7 @@ private fun DownloadedSongRow(
             contentAlignment = Alignment.Center
         ) {
             if (song.picUrl.isNotBlank()) {
-                AsyncImage(model = song.picUrl, contentDescription = "封面", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                FadingAsyncImage(model = song.picUrl, contentDescription = "封面", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 // 无封面兜底：统一封面占位图铺满（原为 MusicNote 图标）
                 Image(
@@ -2100,7 +2215,7 @@ private fun ConvertedFileRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(file.name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                "${formatFileSize(file.length())} · ${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(file.lastModified()))}",
+                "${formatFileSize(file.length())} ${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(file.lastModified()))}",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -2170,7 +2285,9 @@ private fun ConversionProgressCard(state: ConversionState, onCancel: () -> Unit,
 /** 多选模式底部批量操作栏：批量删除 / 批量转换 / 批量分享。 */
 @Composable
 private fun StorageBatchBar(selectedCount: Int, onDelete: () -> Unit, onConvert: () -> Unit, onShare: () -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+    // 液态分支去白块：实色 surfaceContainer → 半透明主题底（MD3 保持实色）
+    Surface(color = if (LocalMd3Style.current) MaterialTheme.colorScheme.surfaceContainer
+        else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.55f)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2310,7 +2427,7 @@ private fun ConvertSheetContent(
                 }
             }
             val unsupportedNotes = AudioFormats.ALL.filter { it.unsupported }
-                .joinToString("\n") { "· ${it.label}：${it.note ?: "暂不支持"}" }
+                .joinToString("\n") { " ${it.label}：${it.note ?: "暂不支持"}" }
             if (unsupportedNotes.isNotBlank()) {
                 Text(
                     unsupportedNotes,

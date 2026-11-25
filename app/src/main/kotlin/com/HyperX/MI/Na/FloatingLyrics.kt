@@ -435,12 +435,12 @@ class FloatingLyricsService : Service() {
      * 文案替换正好发生在两段的交界帧，四行在同一次回调里一起换字。
      */
     private fun applyLinesSmooth(items: List<Pair<TextView?, CharSequence>>) {
-        // 照搬用户早期 Lua 项目的三行编排（main.lua updateLyricsWithAnimation）：
+        // 三行编排：
         //   第 1 行（上一句）：静止，alpha 0.7
         //   第 2 行（当前句）：自下方 30dp 滑入 + 缩放 0.8→1，400ms Overshoot(1.2) 回弹
         //   第 3 行（下一句）：自下方 15dp 轻滑入，350ms 减速，落定 alpha 0.7
         // 先统一换文案，再按行做各自的入场动画。
-        // 变更检测（Lua 版原有、移植时被删掉）：refreshLyricText 在轮询/样式自愈里
+        // 变更检测：refreshLyricText 在轮询/样式自愈里
         // 也会被调用（行未变化时同样走到这里），没有这个判断就会反复重播滑入动画
         // → 歌词持续抖动。文案没变就什么都不做。
         val changed = items.any { (tv, text) -> tv != null && tv.text?.toString() != text.toString() }
@@ -518,14 +518,14 @@ class FloatingLyricsService : Service() {
 
     /* ================= 卡片背景（只有 不透明 / 透明 两态） ================= */
 
-    /** 照搬 main.lua 的歌词颜色预设（主行色 / 其他行半透明同色 / 阴影色） */
+    /** 歌词颜色预设（主行色 / 其他行半透明同色 / 阴影色） */
     private data class LyricColorSet(val name: String, val currentColor: Int, val otherColor: Int, val shadowColor: Int)
     private val lyricColorSets = listOf(
         LyricColorSet("粉色", 0xFFFF69B4.toInt(), 0x99FF69B4.toInt(), 0xFF8B008B.toInt()),
         LyricColorSet("蓝色", 0xFF1E90FF.toInt(), 0x991E90FF.toInt(), 0xFF00008B.toInt())
     )
 
-    /** 照搬 main.lua 的背景颜色预设（含各自的边框色） */
+    /** 背景颜色预设（含各自的边框色） */
     private data class LyricBgSet(val name: String, val color: Int, val borderColor: Int)
     private val lyricBgSets = listOf(
         LyricBgSet("深色", 0xCC1A1A1A.toInt(), 0x55FFFFFF.toInt()),
@@ -556,7 +556,7 @@ class FloatingLyricsService : Service() {
 
     private fun applyCardBackground() {
         val d = bgDrawable ?: return
-        // 照搬 main.lua：背景 = 预设色（自带透明度）× 面板透明度百分比，12dp 圆角，1dp 边框可开关。
+        // 背景 = 预设色（自带透明度）× 面板透明度百分比，12dp 圆角，1dp 边框可开关。
         // 自定义背景（lyricBgIndex == -1）不走预设：用用户选的 bgColor 的 RGB，
         // 透明度按现有逻辑（不透明白底）；之前索引 -1 被 clamp 成 0 → 永远显示预设色。
         val bi = FloatingLyricsPrefs.lyricBgIndex(this)
@@ -580,7 +580,6 @@ class FloatingLyricsService : Service() {
             showingPanel -> {
                 // 面板自身永远是固定深色 MD3 surface：绝不跟随歌词卡片底色。
                 // 否则用户把歌词底色设成白色后，面板里的白色文字会被底色吃掉、完全看不见
-                // （用户实测反馈的问题）。
                 d.setColor(0xF21B1B1F.toInt())
                 d.setStroke(dp(1), Color.argb(38, 255, 255, 255))
             }
@@ -598,7 +597,7 @@ class FloatingLyricsService : Service() {
     }
         /* ================= 视图构建 ================= */
 
-    /** 窗口宽度：照搬 main.lua（默认 280dp，可调 280-400），再乘「卡片宽度」百分比（默认 100% 不变）。 */
+    /** 窗口宽度（默认 280dp，可调 280-400），再乘「卡片宽度」百分比（默认 100% 不变）。 */
     private fun cardFixedWidthPx(): Int =
         dp(FloatingLyricsPrefs.windowWidthDp(this)) *
             FloatingLyricsPrefs.cardWidthPercent(this).coerceIn(60, 100) / 100
@@ -609,7 +608,7 @@ class FloatingLyricsService : Service() {
         return (fs * resources.displayMetrics.scaledDensity * 1.55f).toInt().coerceAtLeast(dp(22))
     }
 
-    /** 窗口高度：照搬 main.lua（默认 150dp，可调 120-200） */
+    /** 窗口高度（默认 150dp，可调 120-200） */
     private fun cardFixedHeightPx(): Int = dp(FloatingLyricsPrefs.windowHeightDp(this))
 
     private fun buildLyricView(): LinearLayout {
@@ -625,7 +624,7 @@ class FloatingLyricsService : Service() {
             isFocusable = true
         }
 
-        // 照搬 main.lua：三个单行 TextView，上下行间距按「行间距」偏好（0..12dp），minHeight 24dp；
+        // 三个单行 TextView，上下行间距按「行间距」偏好（0..12dp），minHeight 24dp；
         // 第 2 行字号 +2、粗体、当前色 + 4dp 阴影；第 1/3 行普通、半透明同色 + 3dp 阴影。
         lyricTextViews = (1..3).map { idx ->
             TextView(this).apply {
@@ -985,7 +984,7 @@ class FloatingLyricsService : Service() {
         bScroll.addView(bRow2)
         col.addView(bScroll)
 
-        // 窗口宽度 / 高度（照搬 Lua：280-400 / 120-200）
+        // 窗口宽度 / 高度（280-400 / 120-200）
         col.addView(sectionLabel("窗口宽度: " + FloatingLyricsPrefs.windowWidthDp(this@FloatingLyricsService) + "dp"))
         val wRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         wRow.addView(stepButton(R.drawable.ic_fl_remove) {
@@ -1380,7 +1379,7 @@ class FloatingLyricsService : Service() {
 
     /** 歌词文字样式：上一行/下一行淡出、当前行加粗高亮（动态色）、翻译行弱化。 */
     private fun restyleInPlace() {
-        // 照搬 main.lua：三行颜色完全由预设组决定（主行 +2 号粗体当前色，上下行半透明同色），
+        // 三行颜色完全由预设组决定（主行 +2 号粗体当前色，上下行半透明同色），
         // 阴影同样来自预设 —— 用户在面板切换「文字颜色」就是切换预设组。
         // 自定义色（lyricColorIndex == -1）不走预设：主行直接用用户选的 textColor，
         // 上下行同色 60% 透明，阴影按 textColor 对比度生成 —— 之前索引 -1 被 clamp 成 0，

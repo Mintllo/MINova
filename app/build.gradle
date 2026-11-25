@@ -11,8 +11,8 @@ android {
         applicationId = "com.HyperX.MI.Na"
         minSdk = 24
         targetSdk = 34
-        versionCode = 22
-        versionName = "1.3.3"
+        versionCode = 24
+        versionName = "1.3.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {

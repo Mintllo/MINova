@@ -14,6 +14,9 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 
 /*
  * ============================================================================
@@ -160,7 +163,7 @@ private val SONG_VERSION_PATTERNS: List<Pair<String, Regex>> = listOf(
     "instrumental" to Regex("(?i)(伴奏|instrumental|karaoke|off\\s*vocal|无人声)"),
     "pure" to Regex("(?i)(纯音乐|纯音|inst\\.|acoustic)"),
     "live" to Regex("(?i)(live版|live|concert|演唱会|现场版|现场|unplugged)"),
-    "remix" to Regex("(?i)(dj版|dj|remix|混音|电音|加速版|减速版|sped\\s*up|slowed)"),
+    "remix" to Regex("(?i)(dj版|dj|remix|remixes|混音|电音|加速版|减速版|sped\\s*up|slowed|extended|extend|bootleg)"),
     "other" to Regex("(?i)(童声|女声版|男声版|钢琴版|吉他版|清唱|合唱版|铃声版)"),
 )
 
@@ -183,7 +186,7 @@ fun songBaseTitle(name: String): String {
 
 /** 版本无关的标题比较键（去空白、标点、大小写差异）。 */
 fun songTitleKey(s: String): String =
-    songBaseTitle(s).lowercase().replace(Regex("[\\s\\p{Punct}·、，。！？《》「」“”‘’]+"), "")
+    songBaseTitle(s).lowercase().replace(Regex("[\\s\\p{Punct} 、，。！？《》「」“”‘’]+"), "")
 
 /**
  * 搜索结果去重键：歌名 + 歌手 + **版本 tag**。
@@ -218,6 +221,43 @@ object MusicApiPrefs {
         prefs(context).edit()
             .putString(KEY_MUSIC_API_COOKIE_PREFIX + source.name.lowercase(), cookie.trim())
             .apply()
+    }
+}
+
+/**
+ * 音质选择 —— 对应 go-music-api `GET /api/v1/music/url` 的 `br` 参数：
+ *   标准 = 320000（默认）；高 = 999000（无损；服务端账号无权限时上游自行回落到低码率）。
+ * 进程内单例 + SharedPreferences（[MUSIC_API_PREF]）持久化；[br] 用 Compose 状态承载，
+ * UI（设置页 / 播放器音质弹窗）读取即订阅，切换后文案即时刷新。
+ * 解析请求侧（[MusicApiClient.tryResolveUrl]）直接读当前值，下一首歌解析即生效。
+ */
+object AudioQuality {
+    const val BR_STANDARD = "320000"
+    const val BR_HIGH = "999000"
+    private const val KEY_BR = "music_api_audio_br"
+
+    /** 当前生效的 br（Compose 可观察）。 */
+    var br: String by mutableStateOf(BR_STANDARD)
+        private set
+
+    /** 用户可读名称。 */
+    fun label(value: String = br): String = if (value == BR_HIGH) "高音质" else "标准音质"
+
+    /** App 启动时恢复上次选择（App.onCreate 调一次）。 */
+    fun load(context: Context) {
+        val saved = context.applicationContext
+            .getSharedPreferences(MUSIC_API_PREF, Context.MODE_PRIVATE)
+            .getString(KEY_BR, BR_STANDARD) ?: BR_STANDARD
+        br = saved
+    }
+
+    /** 切换音质并持久化。 */
+    fun update(context: Context, value: String) {
+        val v = if (value == BR_HIGH) BR_HIGH else BR_STANDARD
+        br = v
+        context.applicationContext
+            .getSharedPreferences(MUSIC_API_PREF, Context.MODE_PRIVATE)
+            .edit().putString(KEY_BR, v).apply()
     }
 }
 
@@ -396,20 +436,26 @@ object MusicApiClient {
     }
 
     /**
-     * 免 Cookie 可用源，按**实测 prepare 速度**排序（序号越小优先级越高）。
+     * 跨源候选源优先级（序号越小优先级越高）。
      *
-     * 实测（Android 模拟器，同一台设备同一网络）：
-     *   kuwo / kugou / migu / bilibili 直链 → onPrepared 0.4~1.4 秒
-     *   网易云直链（m701.music.126.net）   → onPrepared 稳定 31~32 秒
-     * 所以跨源候选同分时优先选 kuwo/kugou，网易云放最后（用户反馈"要等很久才自动播放"）。
+     * 用户指定解析优先级：网易 → 酷狗 → QQ → 酷我 → 咪咕 → 千千。
+     * 服务端持有网易 Cookie：网易免费歌直接给完整直链；网易 VIP 歌返回空 URL，
+     * 由调用方（MainActivity 的换源循环）依次落到后续源。跨源严格匹配三重校验不变，
+     * 只改「同分候选时选谁」与逐源尝试顺序。
+     * 网易直链 prepare 慢（实测 31s）的问题已由串流代理解决（resolveFastUrl/candidateUrl
+     * 对 netease 均走 /music/stream，服务端取流 ~1s），网易排第一不再拖慢起播。
      */
-    private val PREFERRED_SOURCES = listOf("kuwo", "migu", "bilibili", "qq", "netease")
+    private val PREFERRED_SOURCES = listOf("netease", "kugou", "qq", "kuwo", "migu", "qianqian")
 
     /** 跨源匹配允许的最大时长差（秒）。 */
     private const val STRICT_DURATION_TOLERANCE_SEC = 3L
 
     /** 第二轮「同歌不同版本」允许的最大时长差（秒）：版本时长可能不同（Live/重制等），放宽到 10s。 */
     private const val VERSION_DURATION_TOLERANCE_SEC = 10L
+
+    /** 第三轮「版本类宽松档」（任务 8）允许的最大时长差（秒）：DJ/Remix/Extended 版比原唱
+     *  长几十秒是常态，3s/10s 指纹会整类拒掉 → 歌单里的 DJ 歌大面积「播放不了」。放宽到 45s。 */
+    private const val VERSION_CLASS_DURATION_TOLERANCE_SEC = 45L
 
     /** 源优先级：越靠前越小。 */
     private fun sourcePriority(src: String): Int =
@@ -430,8 +476,8 @@ object MusicApiClient {
      *  3. 没有任何候选通过 → 返回 null（**宁可跳过也不放错歌**）。
      *
      * 已彻底删除的两条危险路径：
-     *  · 「按歌名去别的平台搜，取最像的一个」—— 同名/近名的另一首歌会被直接播放；
-     *  · 「用原 id 去其它平台硬试」—— 不同平台的数字 id 会撞车，对方返回**合法但完全不同**的歌。
+     * 「按歌名去别的平台搜，取最像的一个」—— 同名/近名的另一首歌会被直接播放；
+     * 「用原 id 去其它平台硬试」—— 不同平台的数字 id 会撞车，对方返回**合法但完全不同**的歌。
      *
      * 调用方必须用返回的 `source/id` 去取歌词，否则会出现「用 A 平台 id 取 B 平台歌词」。
      *
@@ -469,14 +515,14 @@ object MusicApiClient {
     private val BRACKET_SEGMENT_REGEX = Regex("[（(\\[【][^）)\\]】]{0,60}[）)\\]】]")
 
     /** 空白与标点（含中文标点）：严格比对键里全部丢掉。 */
-    private val KEY_PUNCT_REGEX = Regex("[\\s\\p{Punct}·・、，。！？；：…—～《》「」『』“”‘’]+")
+    private val KEY_PUNCT_REGEX = Regex("[\\s\\p{Punct} ・、，。！？；：…—～《》「」『』“”‘’]+")
 
     /**
      * 版本修饰词 —— 归一化时整词删除。
      * ASCII 词要求两侧不是字母/数字（避免把 "alive" 里的 live 误删）；中文词直接删。
      */
     private val VERSION_DECORATOR_REGEXES: List<Regex> = listOf(
-        Regex("(?i)(?<![a-z0-9])(dj\\s*版?|remix\\s*版?|混音\\s*版?|加速版|减速版|sped\\s*up|slowed)(?![a-z0-9])"),
+        Regex("(?i)(?<![a-z0-9])(dj\\s*版?|remix(es)?\\s*版?|extended?|bootleg|混音\\s*版?|加速版|减速版|sped\\s*up|slowed)(?![a-z0-9])"),
         Regex("(?i)(?<![a-z0-9])(live\\s*版?|现场版|演唱会|现场|unplugged|concert)(?![a-z0-9])"),
         Regex("(?i)(?<![a-z0-9])(cover\\s*版?|翻唱\\s*版?|翻自)(?![a-z0-9])"),
         Regex("(?i)(?<![a-z0-9])(instrumental|karaoke|off\\s*vocal|伴奏\\s*版?|无人声)(?![a-z0-9])"),
@@ -595,6 +641,30 @@ object MusicApiClient {
         return true
     }
 
+    /**
+     * 第三轮「版本类宽松档」准入判定（任务 8）：DJ/Remix/Extended/Bootleg/加速/减速等版本类的
+     * 时长与原唱常差几十秒，第一轮 3s / 第二轮 10s 的时长指纹会把整类拒掉 →
+     * 歌单里的 DJ 歌跨源大面积「播放不了」。放宽为：
+     *   ① 基准歌名键相等（[songTitleKey]，已剥离版本修饰词/含版本词的括号片段）
+     *   ② 歌手交集强制命中（与第二轮同强度，一方为空不放行 —— 宁可不播也不错播）
+     *   ③ 双方 duration 都 > 0 时，差值 <= [VERSION_CLASS_DURATION_TOLERANCE_SEC]（45s）
+     * 试听守卫不受影响：DJ 版通常比原唱更长，不会触发「真实时长明显短于原长」的试听判定。
+     */
+    private fun isSameSongVersionClass(
+        cand: PlaylistSong,
+        targetArtist: String,
+        targetDurationSec: Long,
+        targetBaseKey: String,
+    ): Boolean {
+        if (targetBaseKey.isBlank()) return false
+        if (songTitleKey(cand.name.substringBefore("/")) != targetBaseKey) return false
+        if (strictArtistTokens(cand.artist).isEmpty() || strictArtistTokens(targetArtist).isEmpty()) return false
+        if (!strictArtistIntersect(cand.artist, targetArtist)) return false
+        val delta = durationDeltaSeconds(cand.duration, targetDurationSec)
+        if (delta != null && delta > VERSION_CLASS_DURATION_TOLERANCE_SEC) return false
+        return true
+    }
+
     /** 搜索关键词：从「精确」到「宽松」依次尝试（校验始终严格，关键词宽松不会放错歌）。 */
     private fun strictSearchKeywords(name: String, artist: String): List<String> {
         val clean = strictCleanTitle(name)
@@ -697,6 +767,20 @@ object MusicApiClient {
             alternateVersionHit = true
             android.util.Log.i("MINova-HTTP", "strictResolve round=2(otherVersion) hit src=" + it.source + " id=" + it.id)
             return it
+        }
+        // 第三轮（任务 8）：版本类宽松档 —— 目标歌名带版本词（DJ/Remix/Extended/Bootleg/加速/减速…）
+        // 时放宽到基准歌名 + 歌手交集 + 时长差 <= 45s；跳过前两轮已试过的候选。
+        if (songVersionTag(name).isNotBlank() || baseKey != targetKey) {
+            attempt(
+                pool.values.filter {
+                    val k = it.src + "|" + it.song.id
+                    !tried.contains(k) && isSameSongVersionClass(it.song, artist, targetDurationSec, baseKey)
+                }
+            )?.let {
+                alternateVersionHit = true
+                android.util.Log.i("MINova-HTTP", "strictResolve round=3(versionClass) hit src=" + it.source + " id=" + it.id)
+                return it
+            }
         }
         return null
     }
@@ -937,7 +1021,12 @@ object MusicApiClient {
         }
         val src = source.ifBlank { "netease" }
         return try {
-            val text = execute("GET", buildUrl(baseUrl, "/api/v1/music/url", listOf("id" to id, "source" to src)), timeoutMs = 12_000)
+            // br：音质选择（AudioQuality），标准=320000 / 高=999000；上游不认识的源会忽略该参数。
+            val text = execute(
+                "GET",
+                buildUrl(baseUrl, "/api/v1/music/url", listOf("id" to id, "source" to src, "br" to AudioQuality.br)),
+                timeoutMs = 12_000
+            )
             val o = envelopeData(text) as? JSONObject ?: JSONObject()
             val u = o.optString("url").ifBlank { o.optString("data") }
             u.takeIf { it.startsWith("http") }
@@ -947,7 +1036,7 @@ object MusicApiClient {
     }
 
     /** 快 CDN 源（与 MainActivity.FAST_CDN_SOURCES 口径一致）：自身源同 id 直取排最前。 */
-    private val FAST_CDN_SOURCES = setOf("kuwo", "migu", "bilibili")
+    private val FAST_CDN_SOURCES = setOf("kuwo", "migu")
 
     /**
      * 后端串流代理地址（swagger `/api/v1/music/stream`：服务端取流转发，解决防盗链/跨域，

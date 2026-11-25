@@ -77,6 +77,36 @@ object Motion {
 }
 
 /**
+ * 轻量列表项入场：alpha + 上浮 12dp，240ms，index >= 0 时按全局 32ms 错峰（上限 10 项）。
+ * 专给长列表（搜索结果/播放历史/收藏/搜索历史弹窗）用：LazyColumn item 状态驱动，
+ * 首帧 0 → 240ms 内落定，动画值在 graphicsLayer 内逐帧读取，不触发内容重组、不阻塞滚动。
+ * 滚动回收后再进入会重播一次，与 DiscoverScreen/PlaylistScreen 的 enterAnimation 行为一致。
+ */
+@Composable
+fun Modifier.listItemEnter(index: Int = -1): Modifier {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val d = Motion.staggerDelayMillis(index)
+        if (d > 0L) delay(d)
+        visible = true
+    }
+    val alpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(240, easing = Motion.enterEasing),
+        label = "listItemEnterAlpha"
+    )
+    val dy by animateDpAsState(
+        targetValue = if (visible) 0.dp else 12.dp,
+        animationSpec = tween(240, easing = Motion.enterEasing),
+        label = "listItemEnterDy"
+    )
+    return this.graphicsLayer {
+        this.alpha = alpha
+        translationY = dy.toPx()
+    }
+}
+
+/**
  * 全应用统一的列表/分区入场动画：淡入 + 上浮，按 index 错峰。
  * DiscoverScreen / PlaylistScreen 等处的私有 enterAnimation 都委托到这里，
  * 保证跨页面节奏一致。

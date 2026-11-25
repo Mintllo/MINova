@@ -131,6 +131,23 @@ object PlaylistCloudSync {
         local + restored
     }
 
+    /** 删除本地歌单对应的云端歌单，并移除本地 id 映射，避免下次同步复活。 */
+    suspend fun delete(ctx: Context, token: String, playlist: PlaylistInfo): Boolean = withContext(Dispatchers.IO) {
+        if (token.isBlank()) return@withContext false
+        val root = apiRoot(ctx)
+        val map = loadMap(ctx)
+        val cloudId = map[playlist.id] ?: runCatching { listCloud(root, token) }.getOrNull()
+            ?.firstOrNull { it.name == playlist.name && it.partition == playlist.partition }?.id?.toString()
+        val deleted = cloudId != null && runCatching {
+            readText(open(root, "/api/v1/playlists/$cloudId", token, "DELETE"))
+        }.isSuccess
+        if (deleted) {
+            map.remove(playlist.id)
+            saveMap(ctx, map)
+        }
+        deleted
+    }
+
     // ---------------------------------------------------------------- HTTP
 
     private fun open(root: String, path: String, token: String, method: String): HttpURLConnection {

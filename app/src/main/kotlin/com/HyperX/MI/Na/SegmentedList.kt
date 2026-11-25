@@ -48,6 +48,18 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
+import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.drawBackdrop
 
 private val SegmentedOuterRadius = 16.dp
 private val SegmentedInnerRadius = 4.dp
@@ -105,17 +117,34 @@ private fun SegmentedRow(
     enabled: Boolean = true,
     trailing: @Composable () -> Unit,
 ) {
-    val container = MaterialTheme.colorScheme.surfaceBright
+    // 液态模式（LocalMd3Backdrop 非空）：卡片本体真磨砂（backdrop blur + 半透明着色）
+    val glass = LocalMd3Backdrop.current
+    val container = if (glass == null) MaterialTheme.colorScheme.surfaceBright else Color.Transparent
     val colors = ListItemDefaults.segmentedColors(
         containerColor = container,
         disabledContainerColor = container,
         supportingContentColor = MaterialTheme.colorScheme.onSurfaceVariant
     )
     val shapes = ListItemDefaults.segmentedShapes(index = index, count = count)
+    val glassShape = RoundedCornerShape(
+        topStart = if (index == 0) 16.dp else 4.dp,
+        topEnd = if (index == 0) 16.dp else 4.dp,
+        bottomEnd = if (index == count - 1) 16.dp else 4.dp,
+        bottomStart = if (index == count - 1) 16.dp else 4.dp
+    )
+    val glassFrost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.22f)
+    val glassModifier = if (glass != null) Modifier.drawBackdrop(
+        backdrop = glass,
+        shape = { glassShape },
+        effects = { blur(10f.dp.toPx()) },
+        highlight = { com.kyant.backdrop.highlight.Highlight.Plain.copy(alpha = 0f) },
+        onDrawSurface = { drawRect(glassFrost) }
+    ) else Modifier
     val noop: () -> Unit = {}
     val clickAction: () -> Unit = if (enabled) (onClick ?: noop) else noop
     androidx.compose.material3.SegmentedListItem(
         onClick = clickAction,
+        modifier = glassModifier,
         colors = colors,
         shapes = shapes,
         leadingContent = icon?.let { { Icon(it, null, modifier = Modifier.size(24.dp)) } },
@@ -145,21 +174,10 @@ fun SegmentedSwitchItem(
             onCheckedChange(!checked)
         }
     ) {
-                Switch(
+                LiquidSwitch(
             checked = checked,
             enabled = enabled,
-            onCheckedChange = { onCheckedChange(it) },
-            thumbContent = {
-                Icon(
-                    imageVector = if (checked) Icons.Rounded.Check else Icons.Rounded.Close,
-                    contentDescription = null,
-                    modifier = Modifier.size(SwitchDefaults.IconSize)
-                )
-            },
-            colors = SwitchDefaults.colors(
-                                checkedIconColor = MaterialTheme.colorScheme.primary,
-                uncheckedIconColor = MaterialTheme.colorScheme.surfaceContainerHighest
-            )
+            onCheckedChange = onCheckedChange
         )
     }
 }
@@ -244,4 +262,37 @@ fun SegmentedDropdownItem(
             }
         }
     }
+}
+
+
+/** 液态风格开关：半透明胶囊轨道 + 白色玻璃旋钮，spring 弹性位移，无边框无高光。 */
+@Composable
+private fun LiquidSwitch(checked: Boolean, enabled: Boolean = true, onCheckedChange: ((Boolean) -> Unit)? = null) {
+    val glass = LocalMd3Backdrop.current
+    if (!LocalMd3Style.current && glass != null && onCheckedChange != null) {
+        // 液态模式：悬浮歌词设置同款液态开关（可拖拽玻璃旋钮 + 彩色轨道）
+        LiquidToggleSwitch(
+            checked = checked,
+            onCheckedChange = { onCheckedChange(it) },
+            backdrop = glass
+        )
+        return
+    }
+    // MD3 模式：原版 Material3 Switch
+    Switch(
+        checked = checked,
+        enabled = enabled,
+        onCheckedChange = { onCheckedChange?.invoke(it) },
+        thumbContent = {
+            Icon(
+                imageVector = if (checked) Icons.Rounded.Check else Icons.Rounded.Close,
+                contentDescription = null,
+                modifier = Modifier.size(SwitchDefaults.IconSize)
+            )
+        },
+        colors = SwitchDefaults.colors(
+            checkedIconColor = MaterialTheme.colorScheme.primary,
+            uncheckedIconColor = MaterialTheme.colorScheme.surfaceContainerHighest
+        )
+    )
 }

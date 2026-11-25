@@ -1,6 +1,8 @@
 package com.HyperX.MI.Na
 
 import androidx.activity.compose.BackHandler
+import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.effects.blur
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.ui.res.painterResource
@@ -113,6 +115,75 @@ fun parseVersionTag(name: String, album: String = ""): String? {
  */
 @Composable
 private fun Modifier.enterAnimation(staggerIndex: Int = -1): Modifier = motionEnter(if (staggerIndex > 0) staggerIndex else -1)
+
+/**
+ * 播放行为驱动的本地重排（每播完一首歌对已有列表重排一次，不重新拉取）。
+ *
+ * 打分 = 行为权重（主：PlayTasteProfile 按歌手/风格的播放计数，7 天外时效衰减减半）
+ *      + 文字偏好（辅：设置里选的音乐类型/关注艺人，仅辅助）
+ *      + 少量随机扰动（避免每次重排结果完全固化）；
+ * 输出再做多样性打散：同一歌手不允许超过 3 首连排。
+ *
+ * 护栏（每日 30 首「不要变」，用户强调两次）：
+ *  - 本函数只允许作用于 For You / 相似推荐分区；
+ *  - [daily] 仅作为受保护参照传入：若调用方误把每日 30 当成 [input] 传进来，
+ *    同引用检测直接原样返回（绕过），绝不重排、绝不增删、绝不改变「每日 30 首」的组成。
+ */
+private fun rerankByPlayBehavior(
+    input: List<Song>,
+    daily: List<Song>,
+    nowMs: Long,
+    textGenres: List<String>,
+    textArtists: List<String>
+): List<Song> {
+    // 绕过护栏：每日 30 首一旦被误传入 input，原样返回，保证其组成不被行为重排触碰
+    if (input === daily) return input
+
+    val textArtistSet = textArtists.map { it.lowercase() }.filter { it.isNotBlank() }.toSet()
+    val textGenreSet = textGenres.map { it.lowercase() }.filter { it.isNotBlank() }.toSet()
+
+    fun artistNames(s: Song): List<String> =
+        s.artist.split(",", "，", "/", "&", "、")
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() && it != "未知艺术家" }
+
+    fun score(s: Song): Double {
+        val artists = artistNames(s)
+        // 1) 行为权重（主）：最近真正播放过的歌手/风格
+        val behavior = PlayTasteProfile.artistWeight(artists, nowMs) * 4.0 +
+            PlayTasteProfile.genreWeight(s.name, artists, nowMs) * 2.0
+        // 2) 文字偏好（辅）：设置里选的类型 / 艺人
+        val a = s.artist.lowercase()
+        val n = s.name.lowercase()
+        var text = 0.0
+        textArtistSet.forEach { ta -> if (a.contains(ta)) text += 2.0 }
+        textGenreSet.forEach { tg -> if (a.contains(tg) || n.contains(tg)) text += 1.2 }
+        // 3) 少量扰动，保持换歌后排序有轻微变化但不颠覆
+        return behavior + text + Math.random() * 0.8
+    }
+
+    val ranked = input.map { it to score(it) }
+        .sortedByDescending { it.second }
+        .map { it.first }
+
+    // 多样性打散：同一歌手最多 3 首连排（3 连后强制插入一位其他歌手）
+    val out = ArrayList<Song>(ranked.size)
+    val queue = ArrayDeque(ranked)
+    var lastArtist: String? = null
+    var runLen = 0
+    while (queue.isNotEmpty()) {
+        var idx = 0
+        if (runLen >= 3) {
+            val other = queue.indexOfFirst { artistNames(it).firstOrNull() != lastArtist }
+            if (other >= 0) idx = other
+        }
+        val s = queue.removeAt(idx)
+        val a = artistNames(s).firstOrNull()
+        if (a != null && a == lastArtist) runLen++ else { lastArtist = a; runLen = 1 }
+        out.add(s)
+    }
+    return out
+}
 /**
  * 「推荐」页（发现页）
  *
@@ -120,14 +191,14 @@ private fun Modifier.enterAnimation(staggerIndex: Int = -1): Modifier = motionEn
  *  - 顶部两张并列大卡（For You / Daily 30）：大标题 + 右上封面 + 底部歌名/歌手 + 白色圆形播放键
  *      点「卡面」→ 进入该卡的歌曲列表（大卡点进去才显示列表）
  *      点「播放键」→ 直接播放第一首
- *  - 分区标题：大号加粗 + 可选 💗 + 黑色实心播放键 + 右侧灰色 X（隐藏该分区）
+ *  - 分区标题：大号加粗 + 可选  + 黑色实心播放键 + 右侧灰色 X（隐藏该分区）
  *  - 歌曲行：左封面 / 歌名(粗) + 歌手 / 右侧心形+计数 / 再右侧三列小封面（后续待播）
  *  - 适配双风格：MD3 用 surfaceContainer，液态玻璃用半透明观感
  *  - 数据源：自建免费聚合服务（多源合并）
  */
 @Composable
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
-fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
+fun CommunityScreen(viewModel: PlayerViewModel, backdrop: com.kyant.backdrop.Backdrop, onBack: () -> Unit) {
     val api = MusicApiService.shared
     val ctx = LocalContext.current
     val history by viewModel.historyList.collectAsState()
@@ -148,12 +219,23 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
     var tasteGenres by remember { mutableStateOf(RecommendPrefs.genres(ctx)) }
     var tasteArtists by remember { mutableStateOf(RecommendPrefs.artists(ctx)) }
     var tasteTick by remember { mutableIntStateOf(0) }
+    // 行为重排信号：每播一首歌 +1，只触发 For You/相似推荐的本地重排（不重新拉取、不触碰每日 30）
+    var playTick by remember { mutableIntStateOf(0) }
+    var lastProfiledSongId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { OnboardingState.refresh(ctx) }
     // 设置里改完口味（TasteBus.bump）或引导状态变化时重新同步偏好，并决定是否弹首启窗
+    var seenTasteVersion by remember { mutableIntStateOf(TasteBus.version.intValue) }
     LaunchedEffect(guideReady, tasteVersion) {
         tasteGenres = RecommendPrefs.genres(ctx)
         tasteArtists = RecommendPrefs.artists(ctx)
+        // 设置页保存后 TasteBus.version 前进：bump tasteTick 让推荐立即按新口味重排。
+        //（推荐加载 effect 只挂 tasteTick，此前这里只重读了偏好没有 bump，
+        //  表现为「设置里选完口味，推荐列表纹丝不动」。首启窗路径同样走这里，避免双份刷新。）
+        if (tasteVersion != seenTasteVersion) {
+            seenTasteVersion = tasteVersion
+            tasteTick++
+        }
         // 选过 或 说过「不再提醒」就不再自动弹
         if (guideReady && !RecommendPrefs.picked(ctx) && !RecommendPrefs.neverRemind(ctx)) {
             showTastePicker = true
@@ -169,10 +251,11 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
             onToggleGenre = { g -> tasteGenres = if (g in tasteGenres) tasteGenres - g else tasteGenres + g },
             onToggleArtist = { a -> tasteArtists = if (a in tasteArtists) tasteArtists - a else tasteArtists + a },
             onConfirm = {
-                // 保存 + 让「每日 30 首」与旧歌池缓存失效，否则重进还是上一批排行榜歌
+                // 保存 + 让「每日 30 首」与旧歌池缓存失效，否则重进还是上一批排行榜歌。
+                // saveAndInvalidate 内部会 TasteBus.bump()，由上方 LaunchedEffect 统一 bump tasteTick，
+                // 这里不再手动 ++（否则同一口味会触发两次完整重载）。
                 RecommendPrefs.saveAndInvalidate(ctx, tasteGenres, tasteArtists)
                 showTastePicker = false
-                tasteTick++
             },
             // 点空白处 / 返回键关掉：视为「别再提醒」，以后不再自动弹
             onDismiss = {
@@ -203,13 +286,48 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
     var hiddenSections by remember { mutableStateOf(emptySet<String>()) }
     // 点进大卡后的详情页（null = 停留在推荐首页）
     var openedCard by remember { mutableStateOf<String?>(null) }
-
+    // CMX 液态弹窗：3D 卡组长按歌曲时展示详情与快捷操作（无边框液态玻璃，样式来自 CurrentMusicX）
+    
     // 各分区歌曲汇总成"兜底播放队列"：点分区里的歌时没显式传队列，
     // 有了它一首放完仍能自动接下一首（之前推荐页放完就停住）。
     LaunchedEffect(daily, forYou, similar, everyone, repeated, interest) {
         viewModel.setFallbackQueue(
             (daily + forYou + similar + everyone + repeated + interest).distinctBy { it.id }
         )
+    }
+
+    // ── 行为口味画像：用户每播一首歌 → 该歌手/风格权重 +1，并触发 For You/相似推荐的本地重排 ──
+    // 播放一首歌（currentSong 换成新 id）时记录行为画像并 bump playTick；重排在下一条 effect 里做，
+    // 不重新拉取网络数据（本地重排已有列表，省流量）。
+    LaunchedEffect(currentSongNow?.id) {
+        val s = currentSongNow ?: return@LaunchedEffect
+        if (s.id == lastProfiledSongId) return@LaunchedEffect
+        lastProfiledSongId = s.id
+        PlayTasteProfile.recordPlay(ctx, s.artist, s.name)
+        playTick++
+    }
+
+    // ── 播放行为驱动的本地重排：只作用于 For You / 相似推荐区 ──
+    //
+    // 护栏（每日 30 首「不要变」，用户强调两次）：
+    //  1) 本 effect 永不把 daily 传给重排函数 —— 只传 forYou / similar；
+    //  2) daily 在重排前取引用快照，重排后断言「引用未变 + 内容未变」，
+    //     万一未来改动触碰了 daily，立即原样恢复（绕过），保证每日 30 首当天组成恒定；
+    //  3) 重排函数内部还有一层同引用绕过（见 rerankByPlayBehavior）。
+    LaunchedEffect(playTick) {
+        if (playTick == 0) return@LaunchedEffect
+        if (forYou.isEmpty() && similar.isEmpty()) return@LaunchedEffect
+        val dailyRefBefore = daily
+        val dailyContentBefore = daily
+        val textGenres = RecommendPrefs.genres(ctx)
+        val textArtists = RecommendPrefs.artists(ctx)
+        val now = System.currentTimeMillis()
+        val newForYou = rerankByPlayBehavior(forYou, dailyRefBefore, now, textGenres, textArtists)
+        val newSimilar = rerankByPlayBehavior(similar, dailyRefBefore, now, textGenres, textArtists)
+        forYou = newForYou
+        similar = newSimilar
+        // 断言/绕过：行为重排不得触碰 Daily 30 —— 引用与内容双重校验，被破坏时立即还原
+        if (daily !== dailyRefBefore || daily != dailyContentBefore) daily = dailyContentBefore
     }
 
     val favoriteIds = remember(favorites) { favorites.map { it.id }.toHashSet() }
@@ -229,7 +347,13 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
         )
     }
 
-    LaunchedEffect(history, favorites, searchHistory, tick, tasteTick) {
+    // 推荐种子只在「历史/收藏首次到位（空→非空：登录/冷启动后 loadHistory 异步完成）」时多刷一次；
+    // 之后播放往历史里 addPlayHistory 不再重启整个推荐加载 —— 之前 key 直接挂在 history 上，
+    // 每播一首歌都把 daily/forYou 等分区整个重算一遍，表现为「推荐页播放一首歌，列表就刷新」。
+    // effect 体内在启动时读取 history/favorites/searchHistory 的最新值，所以种子数据并不滞后；
+    // 手动「换一批」(tick) / 改口味 (tasteTick) / 清空历史 仍会正常刷新。
+    val recommendSeedsReady = history.isNotEmpty() || favorites.isNotEmpty()
+    LaunchedEffect(recommendSeedsReady, tick, tasteTick) {
         // 刷新冷却：连续点击「换一批」不再叠加请求风暴（那正是「重复刷新反而拿不到」的原因）
         val now = System.currentTimeMillis()
         if (tick > 0 && now - lastLoadAt < 4000L) return@LaunchedEffect
@@ -342,6 +466,9 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
 
             // ── 每日 30 首：同一天内保持不变，隔天才重新生成 ──
             // 刷新按钮只刷新其它分区；daily 由日期决定，避免用户刷新后「每日 30 首」也变了。
+            // 护栏（每日 30 首「不要变」，用户强调两次）：这里只在完整加载（tick/tasteTick/日期翻新）时
+            // 生成一次；播放行为重排（rerankByPlayBehavior/playTick）永不引用、永不修改本列表，
+            // 行为画像只作用于 For You / 相似推荐区。
             val ranked = diversify(scored, 240)
             val today = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date())
             val savedDate = RecommendPrefs.dailyDate(ctx)
@@ -428,7 +555,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
         val baseKeywords = if (tasteOn) listOf("热门", "新歌榜")
         else listOf(
             "热歌榜", "热门", "新歌榜", "华语流行",
-            "经典老歌", "欧美流行", "日韩流行", "抖音热歌"
+            "经典老歌", "欧美流行", "日韩流行", "华语流行"
         )
         // 口味词放最前面，保证一定进 take(18)
         val allKeywords = (tasteA + tasteG + baseKeywords + seedArtists + recentKeywords).distinct().take(18)
@@ -446,7 +573,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
                             // 推荐池必须用免费源：之前误用网易云专属搜索，
                             // 池子全是热门 VIP 歌，四列重复且全部没有免费音源。
                             val res: List<Song> = kotlinx.coroutines.withTimeoutOrNull(20_000) {
-                                api.search(kw, listOf("kuwo", "migu", "qianqian", "qq", "bilibili"))
+                                api.search(kw, listOf("kuwo", "migu", "qianqian", "qq"))
                                     .getOrDefault(emptyList())
                             } ?: emptyList()
                             // 记录「这批歌是口味关键词搜出来的」，打分时直接加权
@@ -556,40 +683,47 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
             }
         }
 
-        // ── 双大卡 ──
+        // ── CMX 3D 封面轮播（替代原滑动卡组）：For You / Daily 30 数据流切换，点「全部」进详情 ──
         item {
-
-            Row(
-                modifier = Modifier.fillMaxWidth().enterAnimation(1).padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                BigCard(
-                    modifier = Modifier.weight(1f),
-                    badge = "For\nYou",
-                    title = "猜你喜欢",
-                    subtitle = forYou.firstOrNull()?.let { "${it.name} - ${it.artist}" } ?: "沉浸刷歌",
-                    cover = forYou.firstOrNull()?.picUrl.orEmpty(),
-                    colors = listOf(MaterialTheme.colorScheme.primaryContainer),
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    onClick = { openedCard = "foryou" },
-                    onPlay = { forYou.firstOrNull()?.let { viewModel.playSong(it, forYou) } }
-                )
-
-                BigCard(
-                    modifier = Modifier.weight(1f),
-                    badge = "Daily\n30",
-                    title = "每日 30 首",
-                    subtitle = if (loading) "正在挑选…" else "共 ${daily.size} 首",
-                    cover = daily.firstOrNull()?.picUrl.orEmpty(),
-                    colors = listOf(MaterialTheme.colorScheme.secondaryContainer),
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    onClick = { openedCard = "daily" },
-                    onPlay = { daily.firstOrNull()?.let { viewModel.playSong(it, daily) } }
-                )
-            }
+            var deckMode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("daily") }
+            val deckSongs = if (deckMode == "foryou") forYou else daily
+            Column(Modifier.fillMaxWidth().enterAnimation(1).padding(vertical = 12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CmxDeckModePill("For You", selected = deckMode == "foryou", backdrop = backdrop) { deckMode = "foryou" }
+                    CmxDeckModePill("Daily 30", selected = deckMode == "daily", backdrop = backdrop) { deckMode = "daily" }
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "全部 ›",
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable { openedCard = deckMode }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                com.HyperX.MI.Na.cmx.CmxCoverCarousel(
+                    songs = deckSongs,
+                    isPlaying = isPlayingNow,
+                    playingSongId = currentSongNow?.id,
+                    onPlaySelected = { index ->
+                        deckSongs.getOrNull(index)?.let { viewModel.playSong(it, deckSongs) }
+                    },
+                    dateLabel = if (deckMode == "foryou") {
+                        if (loading) "正在挑选…" else "For You 沉浸刷歌 ${forYou.size} 首"
+                    } else {
+                        if (loading) "正在挑选…" else "Daily 30 为你挑选 ${daily.size} 首"
+                    },
+                                    )
+                                }
+                        Spacer(Modifier.height(14.dp))
         }
 
-        // ── 听《X》也会喜欢（参考图：听「X」也会喜欢💗）──
+        // ── 听《X》也会喜欢（参考图：听「X」也会喜欢）──
 
         // 一首都没拿到时给出明确提示，而不是空白页
         if (!loading && daily.isEmpty()) {
@@ -605,7 +739,7 @@ fun CommunityScreen(viewModel: PlayerViewModel, onBack: () -> Unit) {
         if (similar.isNotEmpty() && "similar" !in hiddenSections) {
             item {
                 SectionHeader(
-                    title = if (seedTitle.isBlank()) "为你精选💗" else "听「$seedTitle」也会喜欢💗",
+                    title = if (seedTitle.isBlank()) "为你精选" else "听「$seedTitle」也会喜欢",
                     enterIndex = 2,
                     onPlayAll = { similar.firstOrNull()?.let { viewModel.playSong(it, similar) } },
                     onHide = { hiddenSections = hiddenSections + "similar" }
@@ -909,6 +1043,42 @@ private fun CardDetailPage(
 }
 
 /** 大卡（带封面 + 播放键）；点卡面进列表，点播放键直接播放 */
+@Composable
+private fun CmxDeckModePill(label: String, selected: Boolean, backdrop: com.kyant.backdrop.Backdrop?, onClick: () -> Unit) {
+    val liquid = !com.HyperX.MI.Na.LocalMd3Style.current && backdrop != null
+    val frostOn = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+    val frostOff = Color.White.copy(alpha = 0.16f)
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .then(
+                if (liquid) Modifier.drawBackdrop(
+                    backdrop = backdrop!!,
+                    shape = { RoundedCornerShape(999.dp) },
+                    effects = { blur(10f.dp.toPx()) },
+                    highlight = { com.kyant.backdrop.highlight.Highlight.Plain.copy(alpha = 0f) },
+                    onDrawSurface = { drawRect(if (selected) frostOn else frostOff) }
+                ) else Modifier
+            )
+            .then(
+                if (!liquid) Modifier.background(
+                    if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f)
+                ) else Modifier
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp)
+    ) {
+        Text(
+            label,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+        )
+    }
+}
+
 @Composable
 private fun BigCard(
     modifier: Modifier = Modifier,
@@ -1632,6 +1802,8 @@ internal fun TastePickerSheet(
 ) {
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = { onDismiss() },
+        // 标准 MD3 弹窗：显式 surface 容器色（此前未设，落到暗色默认 → 黑底）
+        containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     ) {
         Column(

@@ -58,7 +58,7 @@ fun Modifier.trackPressPosition(onPress: (Offset) -> Unit): Modifier = pointerIn
     }
 }
 
-val KsuTypography = Typography(
+val NaTypography = Typography(
     bodyLarge = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Normal,

@@ -26,7 +26,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 private fun dynamicAccent(): Color = MiuixTheme.colorScheme.primary
 
 /**
- * 只读进度条 = 官方 M3 Expressive 波浪进度条（下载/更新用，用户认可的标准形态 ✓）。
+ * 只读进度条 = 官方 M3 Expressive 波浪进度条（下载/更新用，官方标准形态）。
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -53,7 +53,7 @@ fun TadpoleWaveProgress(
 
 /**
  * 可拖动进度条 = 与更新进度条**完全同款**的官方 M3 Expressive 波浪组件
- * （同参数：振幅 2 / 波长 40 / 流速 26 / 端点 4）+ 透明手势层（点按/拖动 seek ✓）。
+ * （同参数：振幅 2 / 波长 40 / 流速 26 / 端点 4）+ 透明手势层（点按/拖动 seek）。
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable

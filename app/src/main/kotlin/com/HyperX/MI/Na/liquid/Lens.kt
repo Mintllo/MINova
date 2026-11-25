@@ -1,5 +1,4 @@
 // Adapted from Kyant0/AndroidLiquidGlass — https://github.com/Kyant0/AndroidLiquidGlass (Apache 2.0).
-// Mirrored from compose-miuix-ui example.
 
 package com.HyperX.MI.Na.liquid
 
@@ -33,9 +32,9 @@ fun BackdropEffectScope.lens(
             ROUNDED_RECT_REFRACTION_SHADER
         }
     val key = if (dispersionEnabled) "LiquidGlassLensDispersion" else "LiquidGlassLens"
-    // 照搬 KSU 上游：直接使用效果作用域给出的 downscaleFactor。
-    // ⚠️ 本项目旧版在此注入过 `downscaleFactor = 1`，是"折射被放大、边缘拉伸、逐帧闪烁"的根因：
-    // miuix-blur 按图层尺寸自适应给出 downscaleFactor（实测 822×168 的玻璃条 sf=2、200×147 的
+    // 直接使用效果作用域给出的 downscaleFactor。
+    // 本项目旧版在此注入过 `downscaleFactor = 1`，会导致"折射被放大、边缘拉伸、逐帧闪烁"：
+    // miuix-blur 按图层尺寸自适应给出 downscaleFactor（822×168 的玻璃条 sf=2、200×147 的
     // 选中胶囊 sf=1）。着色器若按全分辨率算 size/offset/rh/ra，采样几何就整体错位 2 倍。
     val sf = downscaleFactor.coerceAtLeast(1).toFloat()
     val scaledSizeW = size.width / sf

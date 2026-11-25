@@ -1,19 +1,29 @@
 package com.HyperX.MI.Na
 
 import android.content.Context
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -21,11 +31,13 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -36,14 +48,24 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PageSize
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.CloudDownload
@@ -52,11 +74,13 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.PlaylistRemove
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material.icons.rounded.Refresh
@@ -69,49 +93,62 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.State
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.HyperX.MI.Na.cmx.CmxPlaylistShelf
+import com.HyperX.MI.Na.cmx.PlaylistShelfMode
+import com.HyperX.MI.Na.cmx.PlaylistShelfModeSwitcher
+import com.HyperX.MI.Na.cmx.PlaylistShelfScene
+import androidx.compose.runtime.saveable.rememberSaveable
 import com.kyant.backdrop.Backdrop
-import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur as glassBlur
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
-import com.kyant.backdrop.highlight.Highlight
+import kotlin.math.abs
+import kotlin.math.sin
+import kotlin.random.Random
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -323,6 +360,13 @@ object PlaylistStore {
         save(context, load(context).filterNot { it.id == id })
     }
 
+    /** 从歌单移除单曲（曲目长按菜单「从歌单删除」），歌单本身保留。 */
+    fun removeSong(context: Context, playlistId: String, songId: String) {
+        save(context, load(context).map { pl ->
+            if (pl.id == playlistId) pl.copy(songs = pl.songs.filterNot { it.id == songId }) else pl
+        })
+    }
+
     fun partitions(context: Context): List<String> =
         (defaultPartitions + load(context).map { it.partition }).distinct()
 }
@@ -344,7 +388,8 @@ private fun Modifier.pressScale(interaction: MutableInteractionSource): Modifier
     }
 }
 
-private val SheetShape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp)
+// internal：cmx/PlaylistRecordShelf 的搜索面板也统一用这套 M3 sheet 外观
+internal val SheetShape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp)
 private val CardShape = RoundedCornerShape(22.dp)
 private val TagShape = RoundedCornerShape(8.dp)
 
@@ -398,7 +443,7 @@ private fun hideServerAddress(text: String, baseHost: String): String {
 }
 
 @Composable
-private fun SheetDragHandle() {
+internal fun SheetDragHandle() {
     Box(
         modifier = Modifier
             .padding(top = 20.dp, bottom = 18.dp)
@@ -447,70 +492,14 @@ private fun MiniTag(
     )
 }
 
-/**
- * 双风格卡片：MD3 用 colorScheme.surfaceContainerLow，液态玻璃用 backdrop 玻璃，
- * 无边框、无阴影（不设 tonalElevation、不加 border）。
- *
- * 同时支持单击与长按（长按用于曲目行的功能菜单）。
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun StyleAwareCard(
-    backdrop: Backdrop,
-    shape: Shape = CardShape,
-    onClick: (() -> Unit)? = null,
-    onLongClick: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
-    content: @Composable RowScope.() -> Unit,
-) {
-    val md3 = LocalMd3Style.current
-    val interaction = remember { MutableInteractionSource() }
-    val base = if (md3) {
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceContainerLow, shape)
-    } else {
-        Modifier
-            .fillMaxWidth()
-            .drawBackdrop(
-                backdrop = backdrop,
-                shape = { shape },
-                effects = {
-                    vibrancy()
-                    glassBlur(8.dp.toPx())
-                    lens(14.dp.toPx(), 28.dp.toPx())
-                },
-                highlight = { Highlight.Plain },
-            )
-    }
-    val touchModifier = when {
-        onClick == null -> Modifier
-        onLongClick == null -> Modifier.clickable(
-            interactionSource = interaction,
-            indication = null,
-            onClick = onClick
-        )
-        else -> Modifier.combinedClickable(
-            interactionSource = interaction,
-            indication = null,
-            onLongClick = onLongClick,
-            onClick = onClick
-        )
-    }
-    Row(
-        modifier = base
-            .then(if (onClick != null) Modifier.pressScale(interaction) else Modifier)
-            .then(modifier)
-            .then(touchModifier)
-            .padding(horizontal = 18.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        content = content
-    )
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlaylistScreen(viewModel: PlayerViewModel, onBack: () -> Unit, backdrop: Backdrop) {
+fun PlaylistScreen(
+    viewModel: PlayerViewModel,
+    onBack: () -> Unit,
+    backdrop: Backdrop,
+    onOpenFootprint: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     var playlists by remember { mutableStateOf(PlaylistStore.load(context)) }
     var sheet by remember { mutableStateOf<PlaylistSheetKind?>(null) }
@@ -553,9 +542,16 @@ fun PlaylistScreen(viewModel: PlayerViewModel, onBack: () -> Unit, backdrop: Bac
         )
     }
     var detailId by remember { mutableStateOf<String?>(null) }
+    // 详情页开关同步给全局：MainActivity 据此隐藏底部导航栏（与其他子页同规则）
+    LaunchedEffect(detailId) { PlaylistDetailBus.open.value = detailId != null }
+    DisposableEffect(detailId) { onDispose { PlaylistDetailBus.open.value = false } }
     var menuSong by remember { mutableStateOf<PlaylistSong?>(null) }
+    // 唱片架长按：与其他界面（搜索/收藏）同一个 SongLongPressSheet，零差别
+    var shelfMenuSong by remember { mutableStateOf<Song?>(null) }
     var addTarget by remember { mutableStateOf<Song?>(null) }
-    val isMd3 = LocalMd3Style.current
+    // 详情陈列模式：右上小图标两态切换（堆叠/简洁），按名字记忆（旧枚举名 FLOW/GRID/RING 残留不崩）
+    var shelfModeName by rememberSaveable { mutableStateOf(PlaylistShelfMode.STACK.name) }
+    val shelfMode = runCatching { PlaylistShelfMode.valueOf(shelfModeName) }.getOrDefault(PlaylistShelfMode.STACK)
 
     fun refresh() {
         playlists = PlaylistStore.load(context)
@@ -564,7 +560,6 @@ fun PlaylistScreen(viewModel: PlayerViewModel, onBack: () -> Unit, backdrop: Bac
     }
     val detail = playlists.firstOrNull { it.id == detailId }
     val downloadedSongs by viewModel.downloadedSongs.collectAsState()
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
 
     // 曲目长按 → 「加入歌单」走全局的 AddToPlaylistSheet（与搜索页同一套逻辑）
     addTarget?.let { target ->
@@ -572,7 +567,7 @@ fun PlaylistScreen(viewModel: PlayerViewModel, onBack: () -> Unit, backdrop: Bac
             song = target,
             onDismiss = { addTarget = null },
             onAdded = { pl ->
-                val ps = PlaylistSong(id = target.id, name = target.name, artist = target.artist, picUrl = target.picUrl)
+                val ps = PlaylistSong(id = target.id, name = target.name, artist = target.artist, picUrl = target.picUrl, source = target.source)
                 PlaylistStore.savePlaylist(context, pl.copy(songs = pl.songs + ps))
                 addTarget = null
                 refresh()
@@ -581,339 +576,136 @@ fun PlaylistScreen(viewModel: PlayerViewModel, onBack: () -> Unit, backdrop: Bac
         )
     }
 
+    // 整页星空挂载点：由「仅详情页」扩到整个歌单页 —— 列表页与详情页共用根部同一片星空。
+    // Scaffold/LargeTopAppBar 已移除，星空铺满整页（含顶部悬浮行后面）。
+    val homeListState = rememberLazyListState()
+    val detailListState = remember(detailId) { LazyListState() }
+    // 卡片漂浮共享相位：单实例无限过渡，graphicsLayer 内读取 → 只更新图层不触发重组
+    val bobTransition = rememberInfiniteTransition(label = "spaceBob")
+    val bobPhase = bobTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = SpaceTwoPi,
+        animationSpec = infiniteRepeatable(tween(5200, easing = LinearEasing)),
+        label = "bobPhase"
+    )
+
     Box(modifier = Modifier.fillMaxSize()) {
-        Scaffold(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-                .nestedScroll(scrollBehavior.nestedScrollConnection),
-            containerColor = Color.Transparent,
-            topBar = {
-                LargeTopAppBar(
-                    title = {
-                        Text(
-                            detail?.name ?: "我的歌单",
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = { if (detail != null) detailId = null else onBack() }) {
-                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回")
-                        }
-                    },
-                    actions = {
-                        if (detail != null) {
-                            IconButton(onClick = {
-                                PlaylistStore.delete(context, detail.id)
-                                detailId = null
-                                refresh()
-                            }) {
-                                Icon(Icons.Rounded.Delete, "删除", tint = MaterialTheme.colorScheme.error)
-                            }
-                        }
-                    },
-                    colors = TopAppBarDefaults.largeTopAppBarColors(
-                        containerColor = Color.Transparent,
-                        scrolledContainerColor = Color.Transparent
-                    ),
-                    scrollBehavior = scrollBehavior
-                )
-            }
-        ) { padding ->
-            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                if (detail == null) {
-                    // —— 两个主操作：新建 / 导入（同一个圆角容器，横向并排）——
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
-                            .background(
-                                if (isMd3) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.45f)
-                                else Color.White.copy(alpha = 0.10f),
-                                RoundedCornerShape(26.dp)
-                            )
-                            .padding(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            SearchLiquidButton(
-                                onClick = { sheet = PlaylistSheetKind.CREATE },
-                                backdrop = backdrop,
-                                shape = RoundedCornerShape(22.dp),
-                                label = "新建歌单",
-                                icon = Icons.Rounded.Add,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        Box(
-                            modifier = Modifier
-                                .padding(horizontal = 4.dp)
-                                .width(1.dp)
-                                .height(28.dp)
-                                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
-                        )
-                        Box(modifier = Modifier.weight(1f)) {
-                            SearchLiquidButton(
-                                // 导入要存到账号名下，未登录先提示登录
-                                onClick = {
-                                    if (PlaylistStore.isLoggedIn(context)) sheet = PlaylistSheetKind.IMPORT
-                                    else showImportLoginRequired = true
-                                },
-                                backdrop = backdrop,
-                                shape = RoundedCornerShape(22.dp),
-                                label = "导入歌单",
-                                icon = Icons.Rounded.CloudDownload,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
-
-                    val grouped = PlaylistStore.partitions(context).map { part ->
-                        part to playlists.filter { it.partition == part }
-                    }
-
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 40.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        grouped.forEach { (part, itemsList) ->
-                            if (itemsList.isNotEmpty()) {
-                                item(key = "h_$part") {
-                                    Text(
-                                        part,
-                                        modifier = Modifier.padding(start = 8.dp, top = 12.dp, bottom = 2.dp),
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                itemsIndexed(itemsList, key = { _, it -> it.id }) { idx, pl ->
-                                    StyleAwareCard(
-                                        backdrop = backdrop,
-                                        onClick = { detailId = pl.id },
-                                        modifier = Modifier.animateItem().enterAnimation(idx)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(44.dp)
-                                                .clip(RoundedCornerShape(14.dp))
-                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                Icons.Rounded.QueueMusic,
-                                                null,
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(24.dp)
-                                            )
-                                        }
-                                        Spacer(Modifier.width(16.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                pl.name,
-                                                fontSize = 16.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Spacer(Modifier.height(7.dp))
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                MiniTag(
-                                                    text = pl.source.label,
-                                                    modifier = Modifier.weight(1f, fill = false)
-                                                )
-                                                MiniTag(text = "${pl.songs.size} 首")
-                                                MiniTag(
-                                                    text = pl.partition,
-                                                    modifier = Modifier.weight(0.8f, fill = false),
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    container = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (playlists.isEmpty()) {
-                            item {
-                                Column(
-                                    modifier = Modifier.fillMaxWidth().padding(top = 60.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.QueueMusic,
-                                        null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                        modifier = Modifier.size(56.dp)
-                                    )
-                                    Spacer(Modifier.height(12.dp))
-                                    Text(
-                                        "还没有歌单",
-                                        fontSize = 17.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        "新建一个歌单，或从音乐平台导入",
-                                        fontSize = 13.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.height(20.dp))
-                                    Button(
-                                        onClick = { sheet = PlaylistSheetKind.CREATE },
-                                        shape = RoundedCornerShape(24.dp),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = MaterialTheme.colorScheme.primary,
-                                            contentColor = MaterialTheme.colorScheme.onPrimary
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 12.dp)
-                                    ) {
-                                        Icon(Icons.Rounded.Add, null, modifier = Modifier.size(18.dp))
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("新建歌单", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                                    }
-                                }
-                            }
-                        }
-                    }
+        // 纯色 MD3 背景（无星空、无暗色压底；唱片架页签自带场景背景会完整盖住本层）
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+        // 列表 ↔ 详情切换动效：进详情折叠展开、退出反向折叠（300ms foldExitEasing），不再瞬切
+        AnimatedContent(
+            targetState = detail,
+            contentKey = { it == null },
+            transitionSpec = {
+                val enteringDetail = targetState != null
+                if (enteringDetail) {
+                    (fadeIn(tween(420, easing = foldEnterEasing)) + scaleIn(
+                        initialScale = 0.94f, animationSpec = tween(420, easing = foldEnterEasing),
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
+                    )) togetherWith fadeOut(tween(220, easing = foldExitEasing))
                 } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 40.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        item {
-                            StyleAwareCard(backdrop = backdrop) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("来源应用", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Spacer(Modifier.height(3.dp))
-                                    Text(
-                                        detail.source.label,
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("所属分区", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Spacer(Modifier.height(3.dp))
-                                    Text(
-                                        detail.partition,
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
+                    // 退出歌单：反向折叠（顶部为轴收拢）+ 淡出，列表随后落定
+                    (fadeIn(tween(260, easing = foldEnterEasing)) + scaleIn(
+                        initialScale = 0.985f, animationSpec = tween(260, easing = foldEnterEasing),
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
+                    )) togetherWith fadeOut(tween(300, easing = foldExitEasing)) + scaleOut(
+                        targetScale = 0.94f, animationSpec = tween(300, easing = foldExitEasing),
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
+                    )
+                }
+            },
+            label = "playlistDetailSwitch"
+        ) { currentDetail ->
+            if (currentDetail == null) {
+                // 歌单列表页：规整列表（无漂浮/无交错/无纵深，仅轻量入场）
+                PlaylistHomeSpace(
+                    playlists = playlists,
+                    listState = homeListState,
+                    onBack = onBack,
+                    onOpenFootprint = onOpenFootprint,
+                    onCreate = { sheet = PlaylistSheetKind.CREATE },
+                    onImport = {
+                        if (PlaylistStore.isLoggedIn(context)) sheet = PlaylistSheetKind.IMPORT
+                        else showImportLoginRequired = true
+                    },
+                    onOpenDetail = { detailId = it }
+                )
+            } else {
+                // 歌单详情 = 两种陈列模式：统一场景容器（STACK 原生唱片架 ↔ SIMPLE 简洁列表，简单 fade 过渡）
+                // 液态玻璃管线已整体拆除（任务 3）：详情页不持有/不传递 backdrop，全部简洁材质。
+                Box(Modifier.fillMaxSize()) {
+                    Box(Modifier.fillMaxSize()) {
+                        PlaylistShelfScene(
+                            detail = currentDetail,
+                            viewModel = viewModel,
+                            mode = shelfMode,
+                            onSongLongPress = { menuSong = it },
+                            onClose = { detailId = null },
+                            stack = {
+                                CmxPlaylistShelf(
+                                    detail = currentDetail,
+                                    viewModel = viewModel,
+                                    downloadedSongs = downloadedSongs,
+                                    onBack = { detailId = null },
+                                    onDelete = {
+                                        PlaylistStore.delete(context, currentDetail.id)
+                                        viewModel.deletePlaylistCloud(currentDetail)
+                                        detailId = null
+                                        playlists = PlaylistStore.load(context)
+                                    },
+                                    onSongMenu = { shelfMenuSong = it.toSong() })
                             }
-                        }
-                        if (detail.songs.isEmpty()) {
-                            item {
-                                Column(
-                                    modifier = Modifier.fillMaxWidth().padding(top = 40.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.MusicNote,
-                                        null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                        modifier = Modifier.size(44.dp)
-                                    )
-                                    Spacer(Modifier.height(12.dp))
-                                    Text("歌单是空的", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        "可以在搜索页长按歌曲，选择「加入歌单」",
-                                        fontSize = 13.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                    )
-                                }
-                            }
-                        }
-                        itemsIndexed(detail.songs, key = { index, it -> "${it.id}#$index" }) { idx, song ->
-                            val downloaded = downloadedSongs.any { it.id == song.id }
-                            StyleAwareCard(
-                                backdrop = backdrop,
-                                onClick = {
-                                    viewModel.playExternalSong(
-                                        song.toSong(),
-                                        song.source.ifBlank { detail.source.apiSourceName() ?: "netease" },
-                                        // 整张歌单作为播放队列 → 播完自动续下一首
-                                        detail.songs.map { it.toSong() }
-                                    )
-                                },
-                                onLongClick = { menuSong = song },
-                                modifier = Modifier.animateItem().enterAnimation(idx)
-                            ) {
-                                PlaylistSongCover(song = song, size = 52.dp)
-                                Spacer(Modifier.width(14.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        song.name,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Spacer(Modifier.height(2.dp))
-                                    Text(
-                                        song.artist.ifBlank { "未知歌手" },
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (downloaded) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(22.dp)
-                                            .clip(RoundedCornerShape(11.dp))
-                                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            Icons.Rounded.Check,
-                                            "已下载",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                    Spacer(Modifier.width(10.dp))
-                                }
-                                Icon(
-                                    Icons.Rounded.PlayArrow,
-                                    "播放",
-                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        }
+                        )
                     }
+                    // 右上两态切换器（模式名只留切换器旁这一处，PlaylistShelfModeHint 底部实例已删）
+                    PlaylistShelfModeSwitcher(
+                        mode = shelfMode,
+                        onMode = { shelfModeName = it.name },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .statusBarsPadding()
+                            // 下移约 24dp（top 64dp → 88dp）：避开顶栏，落在唱片架顶栏下方
+                            .padding(top = 88.dp, end = 16.dp),
+                    )
                 }
             }
         }
     }
 
-    // 曲目长按菜单：加入歌单 / 下载（含下载状态反馈）/ 收藏
+
+    // 曲目长按菜单：收藏 / 加入歌单 / 下载 / 从歌单删除（详情页长按带歌单上下文）
     menuSong?.let { song ->
         PlaylistSongMenuSheet(
             song = song,
+            playlistId = detailId,
+            onRemovedFromPlaylist = {
+                if (detailId != null) {
+                    PlaylistStore.removeSong(context, detailId!!, song.id)
+                    refresh()
+                    AppToast.show("已从歌单删除「${song.name}」")
+                }
+                menuSong = null
+            },
             viewModel = viewModel,
             onDismiss = { menuSong = null },
             onAddToPlaylist = { model ->
                 menuSong = null
                 addTarget = model
+            }
+        )
+    }
+
+    // 唱片架长按 → SongLongPressSheet（与搜索页/收藏长按完全相同的组件，同参数同样式，零差别）
+    shelfMenuSong?.let { song ->
+        val favoriteIds = viewModel.favorites.collectAsState().value.map { it.id }.toHashSet()
+        SongLongPressSheet(
+            song = song,
+            isInFavorites = song.id in favoriteIds,
+            viewModel = viewModel,
+            onDismiss = { shelfMenuSong = null },
+            onRequestAddToPlaylist = {
+                shelfMenuSong = null
+                addTarget = it
             }
         )
     }
@@ -979,6 +771,8 @@ private fun PlaylistSongCover(song: PlaylistSong, size: androidx.compose.ui.unit
 @Composable
 private fun PlaylistSongMenuSheet(
     song: PlaylistSong,
+    playlistId: String? = null,
+    onRemovedFromPlaylist: () -> Unit = {},
     viewModel: PlayerViewModel,
     onDismiss: () -> Unit,
     onAddToPlaylist: (Song) -> Unit,
@@ -1045,6 +839,17 @@ private fun PlaylistSongMenuSheet(
                 tint = MaterialTheme.colorScheme.primary,
                 text = "加入歌单",
             ) { onAddToPlaylist(model) }
+
+            // 从歌单删除：仅在歌单详情页的长按菜单里出现
+            if (playlistId != null) {
+                Spacer(Modifier.height(8.dp))
+                MenuActionRow(
+                    icon = Icons.Rounded.PlaylistRemove,
+                    tint = MaterialTheme.colorScheme.error,
+                    textColor = MaterialTheme.colorScheme.error,
+                    text = "从歌单删除",
+                ) { onRemovedFromPlaylist() }
+            }
 
             Spacer(Modifier.height(8.dp))
 
@@ -1131,6 +936,11 @@ enum class PlaylistSheetKind { CREATE, IMPORT, LOCAL }
  * 引导第 5 项 / 风格页点按钮 → 置 true；
  * MainNavigationScreen 监听到后切到歌单页，PlaylistScreen 自动打开导入面板（[PlaylistSheetKind.IMPORT]）。
  */
+/** 歌单详情打开状态：MainActivity 读取它，在任何子界面（含歌单详情）隐藏底部导航栏。 */
+internal object PlaylistDetailBus {
+    val open = mutableStateOf(false)
+}
+
 internal object ImportBus {
     val pending = mutableStateOf(false)
 
@@ -1712,6 +1522,9 @@ private fun PlaylistImportSheet(
 
                 // 3. 扫码区（二维码 + 登录链接 + 可选 Cookie 登录）
                 val session = qrSession
+                // QQ 等平台的 image_url 直链带 Referer 校验会 403，AsyncImage 静默失败导致二维码空白；
+                // 统一改走后端封面防盗链代理，加载失败再回退本地 QrCodeImage 渲染 qrUrl，保证必出码。
+                var qrImageFailed by remember(session?.imageUrl) { mutableStateOf(false) }
                 if (session != null) {
                     Spacer(Modifier.height(12.dp))
                     Column(
@@ -1719,9 +1532,10 @@ private fun PlaylistImportSheet(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         when {
-                            session.imageUrl.isNotBlank() -> AsyncImage(
-                                model = session.imageUrl,
+                            session.imageUrl.isNotBlank() && !qrImageFailed -> AsyncImage(
+                                model = MusicApiClient.coverProxy(session.imageUrl, "", ""),
                                 contentDescription = "登录二维码",
+                                onError = { qrImageFailed = true },
                                 modifier = Modifier.size(180.dp).clip(RoundedCornerShape(16.dp))
                             )
                             session.qrUrl.isNotBlank() -> Box(
@@ -2006,8 +1820,8 @@ private fun PlaylistImportSheet(
             ) {
                 Text(
                     if (selected == null) "请先选择要导入的歌单"
-                    else if (targetPlaylist != null) "已选 ${selectedSongs.size} 首 · 合并到「${targetPlaylist.name}」"
-                    else "已选 ${selectedSongs.size} 首 · 新建歌单",
+                    else if (targetPlaylist != null) "已选 ${selectedSongs.size} 首 合并到「${targetPlaylist.name}」"
+                    else "已选 ${selectedSongs.size} 首 新建歌单",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -2150,3 +1964,608 @@ fun PlaylistImportPage(onBack: () -> Unit) {
         )
     }
 }
+
+
+// ============================================================================
+//  星空空间实现细节
+// ============================================================================
+
+private const val SpaceTwoPi = 6.2831853f
+private val SpaceHeadHeight = 320.dp
+
+/** 列表页头部视差回退高度：头部滚出屏幕后星空缓移的锚定值。 */
+private val HomeHeadHeight = 320.dp
+
+/** 一颗星星：归一化坐标 + 半径 + 亮度基线/摆幅 + 相位/速度 + 深度 */
+private class SpaceStar(
+    val x: Float,
+    val y: Float,
+    val radius: Float,
+    val baseAlpha: Float,
+    val twinkleAmp: Float,
+    val phase: Float,
+    val speed: Float,
+)
+
+@Composable
+private fun rememberSpaceStars(count: Int = 80): List<SpaceStar> = remember {
+    val rnd = Random(20261121)
+    List(count) {
+        SpaceStar(
+            x = rnd.nextFloat(),
+            y = rnd.nextFloat(),
+            radius = 0.5f + rnd.nextFloat() * 1.9f,
+            baseAlpha = 0.22f + rnd.nextFloat() * 0.5f,
+            twinkleAmp = 0.16f + rnd.nextFloat() * 0.4f,
+            phase = rnd.nextFloat() * SpaceTwoPi,
+            speed = 0.55f + rnd.nextFloat() * 1.5f
+        )
+    }
+}
+
+/**
+ * 星空背景：深空近黑紫 → 近黑蓝渐变打底，全部星星在单个 Canvas 内一次绘制。
+ * 闪烁：单个无限过渡驱动相位，在 draw lambda 内读取（仅重绘不重组）；
+ * 视差：graphicsLayer 读取列表快照状态，内容上滚时星空反向缓移。
+ */
+@Composable
+private fun StarfieldBackground(
+    listState: LazyListState,
+    modifier: Modifier = Modifier,
+    headKey: String? = "pl_head",
+    headFallbackHeight: Dp = SpaceHeadHeight,
+) {
+    val stars = rememberSpaceStars()
+    val twinkle = rememberInfiniteTransition(label = "starTwinkle")
+    val t by twinkle.animateFloat(
+        initialValue = 0f,
+        targetValue = SpaceTwoPi,
+        animationSpec = infiniteRepeatable(tween(6400, easing = LinearEasing)),
+        label = "starPhase"
+    )
+    Box(
+        modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF130B2A), Color(0xFF0A0A22), Color(0xFF04060F))
+                )
+            )
+    ) {
+        Canvas(
+            modifier = Modifier
+                .matchParentSize()
+                .graphicsLayer {
+                    val head = headKey?.let { k ->
+                        listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == k }
+                    }
+                    val scrolled = if (head != null) -head.offset.toFloat() else headFallbackHeight.toPx()
+                    translationY = scrolled * 0.08f
+                }
+        ) {
+            val w = size.width
+            val h = size.height
+            val px = 1.dp.toPx()
+            stars.forEach { s ->
+                val wave = 0.5f + 0.5f * sin(s.phase + t * s.speed)
+                val alpha = (s.baseAlpha + s.twinkleAmp * wave).coerceIn(0.05f, 1f)
+                drawCircle(
+                    color = Color.White.copy(alpha = alpha),
+                    radius = s.radius * px,
+                    center = Offset(s.x * w, s.y * h)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 星空页头部：悬浮的歌单封面卡（这片星空的「恒星」）+ 歌单名 + 数量来源。
+ */
+@Composable
+private fun PlaylistSpaceHead(detail: PlaylistInfo, bobPhase: State<Float>) {
+    val coverUrl = detail.songs.firstOrNull { it.picUrl.isNotBlank() }?.picUrl.orEmpty()
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(SpaceHeadHeight),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        Column(
+            modifier = Modifier.padding(top = 76.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 封面即「恒星」：更慢更深的 sin 漂浮，与卡片相位错开
+            Box(
+                modifier = Modifier
+                    .graphicsLayer { translationY = 4.dp.toPx() * sin(bobPhase.value * 0.8f + 2.3f) }
+                    .size(148.dp)
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(Color.White.copy(alpha = 0.08f))
+            ) {
+                if (coverUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = coverUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(R.drawable.fallback_cover),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                detail.name,
+                fontSize = 21.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 40.dp)
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "${detail.songs.size} 首 · ${detail.source.label} ${detail.partition}",
+                fontSize = 12.sp,
+                color = Color.White.copy(alpha = 0.62f)
+            )
+        }
+    }
+}
+
+/**
+ * 漂浮封面卡：整卡即封面，底部渐晕浮层放歌名/歌手。
+ * 3D 漂浮感全部在单个 graphicsLayer 内完成（读 state 不重组）：
+ * 奇偶交错左右 ±16dp；共享相位的慢速上下漂浮 ±3dp；进屏从深处 scale 0.6→1
+ * 放大浮出并带轻微 rotationY 与 translationZ。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FloatingSongCard(
+    index: Int,
+    song: PlaylistSong,
+    downloaded: Boolean,
+    listState: LazyListState,
+    bobPhase: State<Float>,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    val key = "${song.id}#$index"
+    val side = if (index % 2 == 0) -1f else 1f
+    val shape = RoundedCornerShape(26.dp)
+    Box(
+        modifier = Modifier
+            .padding(horizontal = 30.dp)
+            .fillMaxWidth()
+            .height(172.dp)
+            .graphicsLayer {
+                translationX = side * 16.dp.toPx()
+                translationY = 3.dp.toPx() * sin(bobPhase.value * 1.15f + index * 1.7f)
+                val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }
+                if (info != null) {
+                    val viewport = listState.layoutInfo.viewportSize.height.toFloat()
+                    val center = info.offset + info.size / 2f
+                    val p = ((viewport * 0.94f - center) / (viewport * 0.52f)).coerceIn(0f, 1f)
+                    val eased = p * p * (3f - 2f * p)
+                    val s = 0.6f + 0.4f * eased
+                    scaleX = s
+                    scaleY = s
+                    alpha = 0.4f + 0.6f * eased
+                    rotationY = side * (1f - eased) * 8f
+                    shadowElevation = eased * 18f
+                }
+            }
+            .clip(shape)
+            .background(Color(0xFF171238).copy(alpha = 0.5f))
+            .combinedClickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+    ) {
+        if (song.picUrl.isNotBlank()) {
+            AsyncImage(
+                model = song.picUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize()
+            )
+        } else {
+            Image(
+                painter = painterResource(R.drawable.fallback_cover),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize()
+            )
+        }
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        0.34f to Color.Transparent,
+                        0.72f to Color.Black.copy(alpha = 0.34f),
+                        1f to Color.Black.copy(alpha = 0.78f)
+                    )
+                )
+        )
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    song.name,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    song.artist.ifBlank { "未知歌手" },
+                    fontSize = 12.sp,
+                    color = Color.White.copy(alpha = 0.66f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (downloaded) {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(RoundedCornerShape(11.dp))
+                        .background(Color.White.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Rounded.Check,
+                        "已下载",
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+//  歌单列表页整页星空化：与详情页同一片天 —— 悬浮返回钮 + 漂浮头部 + 歌单卡纵深浮出
+// ============================================================================
+
+/**
+ * 歌单列表页（detail == null 的分支）整页 3D 星空版：
+ * 星空由 PlaylistScreen 根部统一挂载，这里只放悬浮返回钮与内容列表。
+ */
+@Composable
+private fun PlaylistHomeSpace(
+    playlists: List<PlaylistInfo>,
+    listState: LazyListState,
+    onBack: () -> Unit,
+    onOpenFootprint: (() -> Unit)?,
+    onCreate: () -> Unit,
+    onImport: () -> Unit,
+    onOpenDetail: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    androidx.activity.compose.BackHandler { onBack() }
+    val grouped = PlaylistStore.partitions(context).map { part ->
+        part to playlists.filter { it.partition == part }
+    }
+
+    // 回标准 MaterialTheme.colorScheme（用户主题色，不随封面动态取色）。
+    MaterialTheme(colorScheme = MaterialTheme.colorScheme) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 标准 MD3 顶栏：返回键走 IconButton（onSurface），不再用暗底玻璃圆钮
+        Row(
+            modifier = Modifier
+                .zIndex(1f)
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Rounded.ArrowBack,
+                    "返回",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 40.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item(key = "pl_home_head") {
+                PlaylistHomeSpaceHead(
+                    playlists = playlists,
+                    onOpenFootprint = onOpenFootprint,
+                    onCreate = onCreate,
+                    onImport = onImport
+                )
+            }
+            grouped.forEach { (part, itemsList) ->
+                if (itemsList.isNotEmpty()) {
+                    item(key = "h_$part") {
+                        Text(
+                            part,
+                            modifier = Modifier.padding(start = 16.dp, top = 18.dp, bottom = 4.dp),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    itemsIndexed(itemsList, key = { _, it -> it.id }) { idx, pl ->
+                        PlaylistHomeCard(
+                            pl = pl,
+                            modifier = Modifier.animateItem().listItemEnter(idx),
+                            onClick = { onOpenDetail(pl.id) }
+                        )
+                    }
+                }
+            }
+            if (playlists.isEmpty()) {
+                item(key = "pl_home_empty") {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(top = 60.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Rounded.QueueMusic,
+                            null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.size(56.dp)
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "还没有歌单",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "新建一个歌单，或从音乐平台导入",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(20.dp))
+                        Button(
+                            onClick = onCreate,
+                            shape = RoundedCornerShape(24.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 12.dp)
+                        ) {
+                            Icon(Icons.Rounded.Add, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("新建歌单", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    }
+}
+
+/** 列表页头部：大标题 + 数量副标 + 足迹入口 + 新建/导入（静态，无漂浮）。 */
+@Composable
+private fun PlaylistHomeSpaceHead(
+    playlists: List<PlaylistInfo>,
+    onOpenFootprint: (() -> Unit)?,
+    onCreate: () -> Unit,
+    onImport: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(top = 60.dp, bottom = 8.dp)
+            .padding(horizontal = 16.dp)
+    ) {
+        // MD3 排版：headlineSmall 大标题（左对齐网格）+ bodyMedium 副文本，16dp 水平网格
+        Text(
+            "我的歌单",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            if (playlists.isEmpty()) "还没有歌单" else "${playlists.size} 张歌单",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(14.dp))
+        // 听歌足迹入口：保留原主题色胶囊（暗底上依旧可读）
+        if (onOpenFootprint != null) {
+            Surface(
+                onClick = onOpenFootprint,
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Rounded.Schedule,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "听歌足迹",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            "今日收听时长与时段分布",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                        )
+                    }
+                    Icon(
+                        Icons.Rounded.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        // 新建 / 导入：标准 MD3 按钮（FilledTonal + Outlined），不再走暗底玻璃容器
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(
+                onClick = onCreate,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(22.dp),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                ),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Icon(Icons.Rounded.Add, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("新建歌单", fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = onImport,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(22.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                ),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Icon(Icons.Rounded.CloudDownload, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("导入歌单", fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            }
+        }
+    }
+}
+
+/**
+ * 歌单卡（纯色 MD3）：surfaceContainer 实色、无边框无玻璃。
+ * 左 = 第 1 首歌封面（AsyncImage 56dp 圆角，无封面用 placeholder），右 = 歌单名 + 歌曲数副文本。
+ * 入场动效交给调用方的 listItemEnter（alpha + 上浮 12dp）与 animateItem（重排）。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PlaylistHomeCard(
+    pl: PlaylistInfo,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        modifier = modifier
+            .padding(horizontal = 16.dp)
+            .fillMaxWidth()
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLowest, shape)
+            .combinedClickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 左：取自第 1 首歌的封面
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            val cover = pl.songs.firstOrNull()?.picUrl.orEmpty()
+            if (cover.isNotBlank()) {
+                AsyncImage(
+                    model = cover,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Icon(
+                    Icons.Rounded.QueueMusic,
+                    null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        // 右：歌单名 + 歌曲数副文本
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                pl.name,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "${pl.songs.size} 首 · ${pl.source.label}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Icon(
+            Icons.Rounded.ChevronRight,
+            null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
+/** 星空卡片小标签已随列表页玻璃清理删除（无引用死代码，任务 4）。 */

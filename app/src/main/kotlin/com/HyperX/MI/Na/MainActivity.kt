@@ -33,6 +33,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import android.view.WindowManager
 
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -41,6 +42,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.runtime.key
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
+import com.HyperX.MI.Na.cmx.CmxFullScreenSheet
+import com.HyperX.MI.Na.cmx.LocalPlayerSheetDrag
+import com.HyperX.MI.Na.cmx.playerSheetDrag
+import com.HyperX.MI.Na.cmx.rememberCmxPlayerSheetBridge
 import top.yukonga.miuix.kmp.basic.Icon as MiuixIcon
 import top.yukonga.miuix.kmp.basic.Text as MiuixText
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
@@ -65,7 +71,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.statusBarsPadding
+import com.HyperX.MI.Na.stats.FootprintScreen
+import com.HyperX.MI.Na.stats.ListenStatsBinder
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -149,8 +159,11 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -205,6 +218,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -352,7 +366,9 @@ class MusicApiService {
 
     suspend fun search(
             keyword: String,
-            sources: List<String> = listOf("netease", "kuwo", "migu", "qq", "qianqian", "kugou", "bilibili"),  // 聚合搜索：七源并发，平台越多越好；免费源兜底
+            // 用户令：B 站视频条目混入且无法播放 → 搜索源剔除 bilibili（它只保留在
+            // MusicApiClient.PREFERRED_SOURCES 作播放解析兜底，不再参与搜索展示）。
+            sources: List<String> = listOf("netease", "kuwo", "migu", "qq", "qianqian", "kugou"),
         ): Result<List<Song>> = withContext(Dispatchers.IO) {
         // 10 分钟内同关键词走缓存，避免重复请求造成限流假死
         val cacheKey = keyword + "#" + sources.hashCode()
@@ -483,7 +499,8 @@ class MusicApiService {
      */
     suspend fun searchPage(keyword: String, page: Int): List<Song> = withContext(Dispatchers.IO) {
         if (keyword.isBlank() || page < 2) return@withContext emptyList()
-        val sources = listOf("netease", "kuwo", "migu", "qq", "qianqian", "kugou", "bilibili")  // 翻页同主搜索源（七源聚合）
+        // 与主搜索同步：剔除 bilibili（视频条目无法播放），且渲染前过滤非音频条目
+        val sources = listOf("netease", "kuwo", "migu", "qq", "qianqian", "kugou")
         // 与 search() 同一套去重键（带版本标识），保证两个入口的口径一致。
         // native 热点路径：先按源顺序收集，再由 native 一次性「算键 + 首现胜出」；
         // null = 不可用/失败 → 原 Kotlin 逐条路径，行为一致。
@@ -522,7 +539,9 @@ class MusicApiService {
                 m.values.toList()
             }
         }
-        mergedList
+        // 渲染前过滤（与 search() 同一套 native 批量过滤）：有声书/章节/播客等
+        // 非音频条目直接不进结果列表，而不是靠排序后置。
+        filterLikelyMusicList(mergedList)
     }
 
     private fun fetchCovers(ids: String): Map<Long, String> {
@@ -1002,6 +1021,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val searchHistory: StateFlow<List<String>> = _searchHistory
     private val _currentLyrics = MutableStateFlow<LyricData>(LyricData())
     val currentLyrics: StateFlow<LyricData> = _currentLyrics
+    /**
+     * 当前歌的歌词请求是否已结束（拿到词或确认没有词）。
+     * false = 还在取词（歌词页显示加载中）；true 且 currentLyrics 为空 = 确认无词（歌词页显示「暂无歌词」占位）。
+     */
+    private val _lyricsSettled = MutableStateFlow(false)
+    val lyricsSettled: StateFlow<Boolean> = _lyricsSettled
     private val _currentLyricIndex = MutableStateFlow(-1)
     val currentLyricIndex: StateFlow<Int> = _currentLyricIndex
     private val _favorites = MutableStateFlow<List<Song>>(emptyList())
@@ -1330,7 +1355,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val url = run {
                     MusicApiClient.resolveUnblockUrl(song.id)?.let { if (it.startsWith("http")) return@run it }
-                    val keys = listOf("kuwo", "migu", "bilibili", "netease", "qq")
+                    val keys = listOf("kuwo", "migu", "netease", "qq")
                     for (k in keys) {
                         runCatching { MusicApiClient.resolveSongUrlByName(song.id, song.name, song.artist, k) }
                             .getOrNull()?.let { if (it.startsWith("http")) return@run it }
@@ -1395,7 +1420,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (!musicFile.exists()) { _toastMessage.value = "本地文件不存在"; return }
         playJob?.cancel(); playJob = viewModelScope.launch {
             _isPlaying.value = false; _currentSong.value = song; _currentPosition.value = 0
-            _duration.value = song.duration; _currentLyrics.value = LyricData(); _currentLyricIndex.value = -1; releasePlayer()
+            _duration.value = song.duration; _currentLyrics.value = LyricData(); _lyricsSettled.value = false; _currentLyricIndex.value = -1; releasePlayer()
             addPlayHistory(song)
             mediaPlayer = MediaPlayer().apply {
                 setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
@@ -1406,6 +1431,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 try { setDataSource(musicFile.absolutePath); prepareAsync() } catch (_: Exception) { _toastMessage.value = "无法播放本地文件" }
             }
             loadLyricsFor(song)?.let { _currentLyrics.value = it }
+            _lyricsSettled.value = true
         }
     }
 
@@ -1438,6 +1464,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playExternalSong(song: Song, sourceKey: String, queue: List<Song>? = null) {
+        // 回归修复：撤销「空 source 兜底 netease」。空 source 必须交回原解析链
+        //（resolveFastUrl 跨源严格匹配 + 免费源轮询 kuwo/migu/... 逐个兜底），
+        // 锁死 netease 会让跨源兜底链失效（收藏/歌单的歌大面积播不了）。
         playStartedAt = System.currentTimeMillis()
         // 歌单里的歌也要记住队列，否则这首放完不知道该接哪一首
         // 未显式带队列时自动收编：点的是搜索结果里的歌 → 沿用搜索结果（按展示顺序）做队列，
@@ -1459,6 +1488,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             _currentPosition.value = 0
             _duration.value = song.duration * 1000L
             _currentLyrics.value = LyricData()
+            _lyricsSettled.value = false
             _currentLyricIndex.value = -1
             previewRetryCount = 0
             playFailStreak = 0   // 手动点歌 = 重新给满重试额度
@@ -1466,6 +1496,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             releasePlayer()
             try {
                 val url = run {
+                    // 0) 与 playSong 统一：先走 resolveFastUrl 完整解析链（后端 Cookie 完整地址 +
+                    // 串流代理 + 跨源严格匹配候选）——VIP 歌只有这条链能拿到完整版直链。
+                    // 歌单路径此前漏了这一步，只剩同源快路 + 免费源轮询，netease VIP 必挂。
+                    val fast = runCatching {
+                        kotlinx.coroutines.withTimeoutOrNull(PLAY_FAST_TIMEOUT_MS) {
+                            MusicApiClient.resolveFastUrl(song.id, song.name, song.artist, song.source, song.duration)
+                        }
+                    }.getOrNull()
+                    val fastUrl = fast?.play?.url
+                    if (!fastUrl.isNullOrBlank() && fastUrl.startsWith("http")) return@run fastUrl
                     // ① 快路径：同源同 id 直取（一次请求，最快；同平台同 id 必然同一首）
                     val own = song.source.trim().lowercase()
                     if (own.isNotBlank() && song.id.isNotBlank()) {
@@ -1476,7 +1516,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     // ② 免费音源优先：酷我 / 咪咕 / B站 的免费曲库命中率最高，
                     // 放最前面能让能放的歌一秒出声，不用先绕一圈 VIP 源。
-                    val keys = listOf("kuwo", "migu", "bilibili", song.source, sourceKey, "netease", "qq")
+                    val keys = listOf("kuwo", "migu", song.source, sourceKey, "netease", "qq")
                         .filter { it.isNotBlank() }.distinct()
                     for (k in keys) {
                         // 单个音源最多等 8 秒：之前每源都可能拖十几秒，
@@ -1500,8 +1540,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 // 与 playSong 统一：歌词走 loadLyricsFor（带归属校验，避免串词），
                 // 与直链解析并行、不阻塞；回填前用「当前歌 id」守卫，防止慢响应回来串词。
                 viewModelScope.launch {
-                    loadLyricsFor(song, sourceKey)?.let { ld ->
-                        if (_currentSong.value?.id == song.id) _currentLyrics.value = ld
+                    val ld = loadLyricsFor(song, sourceKey)
+                    if (_currentSong.value?.id == song.id) {
+                        if (ld != null) _currentLyrics.value = ld
+                        _lyricsSettled.value = true
                     }
                 }
                 updateMediaMetadata(song)
@@ -1565,7 +1607,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** 本次播放的候选音源顺序（VIP 歌换源用） */
-    private var playSources: List<String> = listOf("qq", "bilibili", "netease")
+    /** 解析优先级（VIP 歌换源用）：网易 → kugou → qq → kuwo → migu → qianqian */
+    private var playSources: List<String> = listOf("netease", "kugou", "qq", "kuwo", "migu", "qianqian")
     private var playSourceIndex = 0
 
     /** 「同源同 id」快路径是否已试过：换源时不要重复打同一个源。 */
@@ -1577,7 +1620,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
      * 因此：① 同源同 id 快路径只对这几个源用；② 网易云的歌优先走**跨源严格搜索**（kuwo/kugou 在前），
      * 只有跨源都找不到时才退回它自己的直链。
      */
-    private val FAST_CDN_SOURCES = setOf("kuwo", "migu", "bilibili")
+    private val FAST_CDN_SOURCES = setOf("kuwo", "migu")
 
     /** 最近一次成功解析实际命中的源（日志用；区别于 song.source） */
     private var lastResolvedSource: String = ""
@@ -1950,8 +1993,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 「自动点一下播放」兜底定时器：起播后若迟迟未出声，自动补一次手动播放的那一下 */
     private var autoPlayKickJob: kotlinx.coroutines.Job? = null
 
-    fun playSong(song: Song, queue: List<Song>? = null) {
+    fun playSong(song: Song, queueParam: List<Song>? = null) {
         playStartedAt = System.currentTimeMillis()
+        // 未显式带队列时自动收编：点的是搜索结果里的歌 → 沿用搜索结果做队列（与 playExternalSong 同款）。
+        // 否则上一轮的旧队列（收藏/唱片架）会粘滞 → 「下一首」跳回旧列表 = 乱跳。
+        var queue = queueParam
+        if ((queue == null || queue.isEmpty()) &&
+            _searchResults.value.any { it.id == song.id }
+        ) {
+            queue = _searchResults.value.asReversed()
+        }
         // 记住这轮播放来自哪个列表，供自动切歌使用。
         // 队列真的换了 → 预解析缓存作废（缓存是按「当前队列的下一首」算出来的）。
         if (!queue.isNullOrEmpty() && _playQueue.value != queue) {
@@ -1985,11 +2036,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _currentPosition.value = 0
         _duration.value = song.duration * 1000L
         _currentLyrics.value = LyricData()
+        _lyricsSettled.value = false
         _currentLyricIndex.value = -1
         // 试听重试计数只对「当前这首歌」生效：每首歌起播归零
         previewRetryCount = 0
         // onError 静默重解同样每首歌只允许一次：换歌时重置
         errorRetryDone = false
+        // 网易 outer 兜底旗标同样按「每首歌」归零：之前一旦某首歌置 true，
+        // 整个会话里后续所有 netease 歌都不再走兜底 —— 跨歌泄漏的会话级状态。
+        neteaseFallbackTried = false
         playJob?.cancel()
         playJob = viewModelScope.launch {
             releasePlayer()
@@ -2001,8 +2056,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             // UI 已经换了新歌，却没声音也没歌词，手动点一下播放才补上」。
             // 回填前用「当前歌 id 是否仍是这首歌」守卫，防止慢请求回来后串词。
             launch {
-                loadLyricsFor(song)?.let { ld ->
-                    if (_currentSong.value?.id == song.id) _currentLyrics.value = ld
+                val ld = loadLyricsFor(song)
+                if (_currentSong.value?.id == song.id) {
+                    if (ld != null) _currentLyrics.value = ld
+                    _lyricsSettled.value = true
                 }
             }
             updateMediaMetadata(song)
@@ -2209,8 +2266,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             // 另外：某些源对特定歌也只给试听片段，所以真正的判定放在 onPrepared 里按真实时长校验。
             playSourceIndex = 0
             ownSourceTried = false
-            // 源顺序 = 实测速度顺序：kuwo/kugou 先（prepare 亚秒级），网易云最后（31~32s）
-            playSources = listOf("kuwo", "migu", "qianqian", "bilibili", "qq", "netease")
+            // 源顺序 = 用户指定解析优先级：网易（服务端有 Cookie，免费歌直接播完整版；
+            // VIP 歌返回空 URL → 依次试 kugou → qq → kuwo → migu → qianqian）。
+            // 起播速度不受影响：netease 歌本身走串流代理（resolveFastUrl ①'，prepare ~1s），
+            // 这里的顺序只决定「换源重试」逐源推进的次序；跨源严格匹配三重校验不变。
+            playSources = listOf("netease", "kugou", "qq", "kuwo", "migu", "qianqian")
             // 优先用「上一首播放时预解析的下一首直链」：自动切歌零等待
             val cached = takePrefetched(song)
             if (cached != null) {
@@ -2340,7 +2400,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (q.isEmpty()) return
         val i = q.indexOfFirst { it.id == cur.id }
-        // 找不到就从头放；到末尾回到第一首（列表循环）
+        // 当前歌不在所选队列里（队列已换且未收编）→ 从队列第一首开始也只会乱跳：
+        // 改为在「与当前歌相关的队列」里找；实在无关才落到队首（此时 q 已是兜底池）。
         val next = if (i >= 0) q[(i + 1) % q.size] else q.firstOrNull()
         android.util.Log.i(
             "MINova-Play",
@@ -2509,6 +2570,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 ctx, 0, openIntent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
+            // 加载封面（同步 ✓ 小图 128px 够用 ✓）
+            val coverBmp = try {
+                if (song.picUrl.isNotBlank()) {
+                    val url = java.net.URL(song.picUrl)
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 3000; conn.readTimeout = 3000
+                    conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
+                } else null
+            } catch (_: Exception) { null }
+            val token = if (::mediaSession.isInitialized) mediaSession.sessionToken else null
             val b = androidx.core.app.NotificationCompat.Builder(ctx, ensureNotifChannel())
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentTitle(song.name)
@@ -2521,6 +2592,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 .setShowWhen(false)
                 .setVisibility(androidx.core.app.NotificationCompat.VISIBILITY_PUBLIC)
                 .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+                .setLargeIcon(coverBmp)
+            if (token != null) {
+                b.setStyle(androidx.media.app.NotificationCompat.MediaStyle()
+                    .setMediaSession(token)
+                    .setShowActionsInCompactView(0, 1, 2))
+            }
             b.addAction(android.R.drawable.ic_media_previous, "上一首", notifAction(ctx, 1, MusicNotificationService.ACTION_PREV))
             b.addAction(
                 if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
@@ -2544,6 +2621,28 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         // 每次切歌都刷新媒体通知（歌名/歌手/切歌按钮）
         postMediaNotification(song, true)
         if (!::mediaSession.isInitialized) return
+        // 加载封面 bitmap（小图 128px ✓ 异步 ✓ 不阻塞 ✓）
+        viewModelScope.launch(Dispatchers.IO) {
+            val coverBmp = try {
+                if (song.picUrl.isNotBlank()) {
+                    val url = java.net.URL(song.picUrl)
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 3000; conn.readTimeout = 3000
+                    conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
+                } else null
+            } catch (_: Exception) { null }
+            if (coverBmp != null && ::mediaSession.isInitialized) {
+                mediaSession.setMetadata(
+                    MediaMetadataCompat.Builder()
+                        .putString(MediaMetadataCompat.METADATA_KEY_TITLE, song.name)
+                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, song.artist)
+                        .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, song.album)
+                        .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, song.duration)
+                        .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, coverBmp)
+                        .build()
+                )
+            }
+        }
         mediaSession.setMetadata(
             MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, song.name)
@@ -2598,6 +2697,13 @@ fun watchAd(activity: android.app.Activity) {
             } catch (_: Exception) {
                 // 同步失败不影响本地使用，静默跳过
             }
+        }
+    }
+
+    fun deletePlaylistCloud(playlist: PlaylistInfo) {
+        if (!_isLoggedIn.value || authToken.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            PlaylistCloudSync.delete(getApplication(), authToken, playlist)
         }
     }
 
@@ -3232,7 +3338,7 @@ fun LiquidBottomTabs(
                             lens(28f.dp.toPx(), 28f.dp.toPx())
                         },
                         highlight = {
-                            Highlight.Default.copy(alpha = 0.5f)
+                            Highlight.Plain
                         },
                         shadow = { Shadow(alpha = 0.12f) },
                         layerBlock = {
@@ -3316,7 +3422,7 @@ fun LiquidBottomTabs(
                     },
                     highlight = {
                         val progress = dampedDragAnimation.pressProgress
-                        Highlight.Default.copy(alpha = 0.3f + progress * 0.4f)
+                        Highlight.Default.copy(alpha = progress * 0.4f)
                     },
                     layerBlock = {
                         scaleX = dampedDragAnimation.scaleX
@@ -3381,6 +3487,7 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
     val currentPosition by viewModel.currentPosition.collectAsState()
     val duration by viewModel.duration.collectAsState()
     val currentLyrics by viewModel.currentLyrics.collectAsState()
+    val lyricsSettled by viewModel.lyricsSettled.collectAsState()
     val currentLyricIndex by viewModel.currentLyricIndex.collectAsState()
 
     val context = LocalContext.current
@@ -3490,7 +3597,7 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
             song = targetSong,
             onDismiss = { showAddToPlaylist = null },
             onAdded = { pl ->
-                val psong = PlaylistSong(id = targetSong.id, name = targetSong.name, artist = targetSong.artist, picUrl = targetSong.picUrl)
+                val psong = PlaylistSong(id = targetSong.id, name = targetSong.name, artist = targetSong.artist, picUrl = targetSong.picUrl, source = targetSong.source)
                 PlaylistStore.savePlaylist(ctxAtp, pl.copy(songs = pl.songs + psong))
                 showAddToPlaylist = null
                 AppToast.show("已加入「" + pl.name + "」")
@@ -3501,21 +3608,80 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
         val windowKey = "${configuration.screenWidthDp}x${configuration.screenHeightDp}"
     val backgroundBackdrop = key(windowKey) { rememberLayerBackdrop() }
     val fullBackdrop = key(windowKey) { rememberLayerBackdrop() }
-                val ksuSurfaceColor = if (viewModel.md3Style) MaterialTheme.colorScheme.surfaceContainer
+                val glassSurfaceColor = if (viewModel.md3Style) MaterialTheme.colorScheme.surfaceContainer
     else MaterialTheme.colorScheme.background
-    val ksuBackdrop = key(windowKey) {
+    val glassBackdrop = key(windowKey) {
         miuixRememberLayerBackdrop {
-            drawRect(ksuSurfaceColor)
+            drawRect(glassSurfaceColor)
             drawContent()
         }
     }
 
-    // 统一动效：入场 300ms 减速 + 强调弹簧上浮，退场 200ms 加速 —— 与全局 Motion 规范一致，
-    // 避免以前「入场 220ms 淡入+弹簧 / 退场 160ms+180ms」两套节奏对不上导致的衔接痕迹。
-    val subPageEnter = fadeIn(Motion.enter()) +
-            slideInVertically(initialOffsetY = { it / 18 }, animationSpec = Motion.emphasized())
-    val subPageExit = fadeOut(Motion.exit()) +
-            slideOutVertically(targetOffsetY = { it / 18 }, animationSpec = Motion.exit())
+    // 页面转场参数取自 CurrentMusicX（GPL-3.0，参考源码 _cmx_ref）：
+    // 主内容缓动 CubicBezierEasing(.2f, 0f, 0f, 1f) 来自 PlayerSheetTransition.kt 的 sheetEasing，
+    // 退场缓动 CubicBezierEasing(.32f, 0f, .67f, .2f) 与 260ms 节奏来自 MusicOverlayDialog.kt。
+    val cmxContentEasing = CubicBezierEasing(.2f, 0f, 0f, 1f)
+    val cmxReturnEasing = CubicBezierEasing(.32f, 0f, .67f, .2f)
+
+    // ── 控制台→全屏转场桥：完整接入 CurrentMusicX 的 PlayerSheetHost 系统 ──
+    // 展开 420ms sheetEasing / 收起 360ms collapseEasing / 封面沿 playerSheetElementArc 飞行 /
+    // 支持拖拽展开、拖拽收起、预测式返回。见 cmx/CmxSheetBridge.kt 与 _cmx_ref。
+    val cmxSheet = rememberCmxPlayerSheetBridge(
+        onOpenRequest = { viewModel.isConsoleFullScreen = true },
+        onCloseRequest = { viewModel.isConsoleFullScreen = false }
+    )
+    val consoleRadiusPx = with(LocalDensity.current) { 24.dp.toPx() }
+
+    // ── 转场单一驱动源派生态（顿挫修复，供控制台/导航栏/侧栏共用）──
+    // sheetFlying：展开/收起动画进行中。转场期间控制台、底部导航栏、平板侧栏
+    // 全部保持组合且静止（被展开的 sheet 逐帧覆盖，收起时被逐帧揭出），不再各自
+    // 跑第二套 spring 进出场动画与 sheet 的 420/360ms tween 抢帧 = 速度错位根因。
+    // derivedStateOf 保证进度逐帧变化只在布尔翻转时触发一次重组（无逐帧重组）。
+    val sheetFlying by remember {
+        derivedStateOf {
+            cmxSheet.motion != com.HyperX.MI.Na.cmx.PlayerSheetMotion.NONE ||
+                (cmxSheet.expansion.value > 0.001f && cmxSheet.expansion.value < 0.999f)
+        }
+    }
+    // 完全展开且落定：此后才允许把被覆盖的层（导航栏/侧栏/控制台）移出组合。
+    val sheetFullyOpen = viewModel.isConsoleFullScreen && !sheetFlying
+
+    // 任何子界面（设置群/历史/歌单/足迹/配色等）或歌单详情打开时，隐藏底部导航栏（液态玻璃与 MD3 两种形态）。
+    val subPageChromeHidden = activeSubPage != null || PlaylistDetailBus.open.value
+
+    // 歌单/详情类子页面：先模糊底下的主内容，再从右侧滑入（进场延迟让模糊先行）；
+    // 返回时立刻向右滑出，模糊随退场同步收回。
+    val detailPageEnter = fadeIn(tween(240, delayMillis = 110, easing = cmxContentEasing)) +
+            slideInHorizontally(tween(360, delayMillis = 110, easing = cmxContentEasing)) { it }
+    val detailPageExit = fadeOut(tween(200, easing = cmxReturnEasing)) +
+            slideOutHorizontally(tween(300, easing = cmxReturnEasing)) { it }
+
+    // 其余子页面：CMX 弹层式淡入 + 轻微缩放（不再用竖向位移），退场节奏与全局 Motion 规范一致。
+    // 设置子页（主题个性化/导航栏/配色等）与全站同源：进场统一用 sheetEasing（CubicBezier(.2,0,0,1)），
+    // 延迟 110ms 让底层模糊（detailBlur 同款）先起、再进场；退场用 MusicOverlayDialog 节奏
+    // （cmxReturnEasing，200/260ms），不再走全局 Motion 的 FastOutSlowIn 旧参数。
+    val subPageEnter = fadeIn(tween(240, delayMillis = 110, easing = cmxContentEasing)) +
+            scaleIn(initialScale = 0.96f, animationSpec = tween(360, delayMillis = 110, easing = cmxContentEasing))
+    val subPageExit = fadeOut(tween(200, easing = cmxReturnEasing)) +
+            scaleOut(targetScale = 0.97f, animationSpec = tween(260, easing = cmxReturnEasing))
+
+    // 底下主内容的模糊进度：进入歌单/详情时先起模糊（220ms），返回时随退场收回（260ms）。
+    // 设置子页与足迹页同样先模糊再进场，与歌单/历史同一条转场链路。
+    val detailBlurActive = activeSubPage == "history" || activeSubPage == "playlists" ||
+            activeSubPage == "footprint" || activeSubPage == "custom_center" ||
+            activeSubPage == "nav_settings" || activeSubPage == "color_palette" ||
+            activeSubPage == "audio_quality"
+    val detailBlur = remember { Animatable(0f) }
+    LaunchedEffect(detailBlurActive) {
+        if (detailBlurActive) {
+            detailBlur.animateTo(1f, tween(220, easing = cmxContentEasing))
+        } else {
+            detailBlur.animateTo(0f, tween(260, easing = cmxReturnEasing))
+        }
+    }
+
+    // 听歌时长统计接入：只读现有播放事件（currentSong/isPlaying/currentPosition），见 stats 包
+    ListenStatsBinder(viewModel)
 
     fun dismissGuide(permanent: Boolean = false) {
         showShakeGuide = false
@@ -3563,8 +3729,13 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                 )
                 .then(
                     if (viewModel.useFloatingNavBar && viewModel.navBarLiquidGlass) {
-                        Modifier.miuixLayerBackdrop(ksuBackdrop)
+                        Modifier.miuixLayerBackdrop(glassBackdrop)
                     } else Modifier
+                )
+                // 歌单/详情进场时「先模糊」作用在这一层：主内容连同两块 backdrop 一起变糊，
+                // 上层毛玻璃面板看到的就是模糊后的内容（与 CurrentMusicX 行为一致）
+                .then(
+                    if (detailBlur.value > 0.01f) Modifier.blur((detailBlur.value * 12f).dp) else Modifier
                 )
         ) {
             if (viewModel.isCustomBackgroundEnabled && !viewModel.md3Style) {
@@ -3606,16 +3777,20 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                 userScrollEnabled = false,
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(start = if (isTablet && !viewModel.isConsoleFullScreen) railWidth else 0.dp)
+                    .padding(start = if (isTablet && !sheetFullyOpen) railWidth else 0.dp)
             ) { page ->
+                // Tab 首次进入：整页轻量入场（240ms 淡入+上浮，FadeSlideIn），四个主 tab 不再静态出现；
+                // 推荐页内部分区自身的错峰入场在其上叠加，其余页内容随之整体落定。
+                FadeSlideIn(modifier = Modifier.fillMaxSize()) {
                 when (page) {
-                    0 -> CommunityScreen(viewModel = viewModel, onBack = { currentTab = 1 })
+                    0 -> CommunityScreen(viewModel = viewModel, backdrop = backgroundBackdrop, onBack = { currentTab = 1 })
                     1 -> MusicSearchTab(viewModel = viewModel, backdrop = backgroundBackdrop)
                     2 -> SettingsThemeTab(
                         viewModel = viewModel,
                         backdrop = backgroundBackdrop,
                         onNavigateToCustomCenter = { activeSubPage = "custom_center" },
-                        onNavigateToColorPalette = { activeSubPage = "color_palette" }
+                        onNavigateToColorPalette = { activeSubPage = "color_palette" },
+                        onNavigateToAudioQuality = { activeSubPage = "audio_quality" }
                     )
                     3 -> ProfileTab(
                         viewModel = viewModel,
@@ -3623,9 +3798,10 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                         onNavigateToHistory = { activeSubPage = "history" }, onNavigateToPlaylists = { activeSubPage = "playlists" }
                     )
                 }
+                }
             }
 
-                        if (isTablet && !viewModel.isConsoleFullScreen) {
+                        if (isTablet && !sheetFullyOpen) {
                 MiuixTabletNavigationRail(
                     backdrop = backgroundBackdrop,
                     selectedTab = currentTab,
@@ -3643,47 +3819,90 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                 .fillMaxWidth()
                 .offset(x = viewModel.navBarOffsetX.dp, y = viewModel.navBarOffsetY.dp)
         ) {
+            // ── 控制台↔全屏转场单一驱动源（顿挫修复）──
+            // 转场期间控制台保持组合且静止（sheetFlying/sheetFullyOpen 见桥创建处）：
+            // 展开时被 sheet 逐帧覆盖、收起时被逐帧揭出，位移/时长/曲线全部由
+            // sheetProgress 单一驱动源决定。此前控制台自带第二套 spring 退场/进场
+            // （与 sheet 的 420/360ms tween 并行），动画时长曲线互不一致。
+            // 收起揭出阶段重新进入组合时禁用控制台自带进场动画（snap）：控制台由
+            // 收起的 sheet 揭出，自身再滑入就是第二条动画 = 速度错位。
+            val dockReveal by remember {
+                derivedStateOf {
+                    !viewModel.isConsoleFullScreen && cmxSheet.expansion.value > 0.001f
+                }
+            }
             AnimatedVisibility(
-                visible = currentSong != null && !viewModel.isConsoleFullScreen && !viewModel.isConsoleMinimized,
-                enter = fadeIn(animationSpec = spring(dampingRatio = 0.82f, stiffness = 240f)) +
+                // 子页（设置群/历史/歌单/足迹/配色等）与歌单详情打开时，控制台一并隐藏
+                // （此前只藏了导航栏，控制台仍挂在页脚）：返回主界面随 subPageChromeHidden 恢复。
+                visible = currentSong != null && !viewModel.isConsoleMinimized &&
+                    (!viewModel.isConsoleFullScreen || sheetFlying) && !subPageChromeHidden,
+                enter = if (dockReveal) fadeIn(snap()) +
+                        slideInVertically(snap()) { 0 } +
+                        scaleIn(animationSpec = snap(), initialScale = 1f)
+                    else
+                        fadeIn(animationSpec = spring(dampingRatio = 0.82f, stiffness = 240f)) +
                         slideInVertically(
                             animationSpec = spring(dampingRatio = 0.75f, stiffness = 200f),
                             initialOffsetY = { it / 3 }
                         ) +
                         scaleIn(initialScale = 0.94f, animationSpec = spring(dampingRatio = 0.80f, stiffness = 220f)),
-                exit = fadeOut(animationSpec = spring(dampingRatio = 0.95f, stiffness = 120f)) +
+                exit = if (sheetFullyOpen)
+                        // 展开落定后控制台已被不透明 sheet 完全覆盖：立即移出组合，
+                        // 不再跑可见的 spring 退场（避免覆盖期间继续占用合成与 backdrop 重绘）。
+                        fadeOut(snap())
+                    else
+                        fadeOut(animationSpec = spring(dampingRatio = 0.95f, stiffness = 120f)) +
                         slideOutVertically(
                             animationSpec = spring(dampingRatio = 0.82f, stiffness = 160f),
                             targetOffsetY = { it / 4 }
                         ) +
                         scaleOut(targetScale = 0.94f, animationSpec = spring(dampingRatio = 0.90f, stiffness = 140f))
             ) {
-                MD3StyleBottomSheetConsole(
-                    currentSong = currentSong,
-                    isPlaying = isPlaying,
-                    isLooping = isLooping,
-                    currentPosition = currentPosition,
-                    duration = duration,
-                    lyrics = currentLyrics,
-                    currentLyricIndex = currentLyricIndex,
-                    viewModel = viewModel,
-                    onPlayPause = { viewModel.togglePlayPause() },
-                    onNext = { viewModel.playNext() },
-                    onPrevious = { viewModel.playPrevious() },
-                    onToggleLoop = { viewModel.toggleLooping() },
-                    isExpanded = viewModel.isConsoleExpanded,
-                    onExpandChange = { viewModel.isConsoleExpanded = it },
-                    onFullScreen = { viewModel.isConsoleFullScreen = true },
-                    isLandscape = isLandscape,
-                    backdrop = fullBackdrop
-                )
+                // 上游 MiniPlayer 同款接线：拖拽手势走 PlayerSheetDragController，封面/面板
+                // 坐标作为转场原点上报，飞行期间封面自身隐藏（由 PlayerArtworkFlight 代画）。
+                CompositionLocalProvider(LocalPlayerSheetDrag provides cmxSheet.drag) {
+                    MD3StyleBottomSheetConsole(
+                        currentSong = currentSong,
+                        isPlaying = isPlaying,
+                        isLooping = isLooping,
+                        currentPosition = currentPosition,
+                        duration = duration,
+                        lyrics = currentLyrics,
+                        currentLyricIndex = currentLyricIndex,
+                        viewModel = viewModel,
+                        onPlayPause = { viewModel.togglePlayPause() },
+                        onNext = { viewModel.playNext() },
+                        onPrevious = { viewModel.playPrevious() },
+                        onToggleLoop = { viewModel.toggleLooping() },
+                        isExpanded = viewModel.isConsoleExpanded,
+                        onExpandChange = { viewModel.isConsoleExpanded = it },
+                        onFullScreen = { cmxSheet.requestOpen() },
+                        isLandscape = isLandscape,
+                        backdrop = fullBackdrop,
+                        onSheetBounds = {
+                            // 飞行期间桥内冻结（见 CmxPlayerSheetBridge.reportConsoleBounds）
+                            cmxSheet.reportConsoleBounds(
+                                com.HyperX.MI.Na.cmx.PlayerSheetOrigin(it, consoleRadiusPx), it
+                            )
+                        },
+                        onCoverBounds = {
+                            cmxSheet.artworkOrigin = com.HyperX.MI.Na.cmx.PlayerArtworkOrigin(
+                                it, 0f, androidx.compose.ui.graphics.Color.Transparent
+                            )
+                        },
+                        artworkVisible = { !cmxSheet.artwork.moving }
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            if (!isTablet && viewModel.useFloatingNavBar && !viewModel.isConsoleFullScreen) {
+            // 浮动栏 = 液态玻璃风格（!md3Style）专属：与低版本回退 init 的不变量一致
+            // （md3Style=true ⇒ 经典底栏）。此前 useFloatingNavBar=true 时 MD3 风格也走浮动栏，
+            // 经典底栏（小白条色块）永不渲染 —— 小白条区域透出内容即此根因。
+            if (!isTablet && viewModel.useFloatingNavBar && !sheetFullyOpen && !subPageChromeHidden) {
                                 val navIsDark = viewModel.isForceDarkMode || ColorMode.fromValue(viewModel.colorMode).isDark || (ColorMode.fromValue(viewModel.colorMode).isSystem && isSystemInDarkTheme())
-                val miuixBackdrop = ksuBackdrop
+                val miuixBackdrop = glassBackdrop
                 MiuixTheme(
                     controller = remember(navIsDark) {
                         ThemeController(if (navIsDark) ColorSchemeMode.Dark else ColorSchemeMode.Light)
@@ -3738,12 +3957,14 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                         }
                     }
                 }
-            } else if (!isTablet && !viewModel.useFloatingNavBar && !viewModel.isConsoleFullScreen) {
+            } else if (!isTablet && (!viewModel.useFloatingNavBar || viewModel.md3Style) && !sheetFullyOpen && !subPageChromeHidden) {
+            val md3NavBarColor = if (LocalMd3Style.current) MaterialTheme.colorScheme.surfaceContainer
+                else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.92f)
+            Column(Modifier.fillMaxWidth().background(md3NavBarColor.copy(alpha = 0.72f))) {
                 NavigationBar(
-                                                            containerColor = if (LocalMd3Style.current) MaterialTheme.colorScheme.surfaceContainer
-                    else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.92f),
+                    containerColor = Color.Transparent,
                     tonalElevation = 0.dp,
-                    windowInsets = WindowInsets.navigationBars
+                    windowInsets = WindowInsets(0, 0, 0, 0)
                 ) {
                     NavigationBarItem(
                         selected = currentTab == 0,
@@ -3770,27 +3991,66 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
                         label = { Text("账号") }
                     )
                 }
+                Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
+            }
             }
         }
 
-        if (viewModel.isConsoleFullScreen && currentSong != null) {
+        // 全屏播放页不再瞬时出现：走上游 PlayerSheetHost 的 sheet 展开/收起系统
+        // （点击展开、拖拽下滑收起、系统返回、预测式返回全部同一条动画管线）。
+        CmxFullScreenSheet(
+            bridge = cmxSheet,
+            open = viewModel.isConsoleFullScreen && currentSong != null,
+            artworkUrl = currentSong?.picUrl.orEmpty(),
+            onBack = { cmxSheet.requestClose() }
+        ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                    FullScreenPlayer(
+                // ── 封面模糊背景层（直接取封面 URL ✓）──
+                // 转场飞行期间暂停全屏背景模糊：SwiftShader/低端机上每帧跑
+                // RenderEffect 会挤占动画帧预算（顿挫根因之一）。模糊半径在
+                // graphicsLayer 内按 sheetProgress 连续恢复（draw 帧延迟读取，
+                // 不触发重组），落定后与原 blur(3.dp) 视觉一致。
+                val sheetProgressForBlur = com.HyperX.MI.Na.cmx.LocalPlayerSheetProgress.current
+                val coverBlurPx = with(LocalDensity.current) { 3.dp.toPx() }
+                // 换歌时全屏页背景封面 600ms 交叉淡化：直接换 model 会硬切，是背景"跳色"来源之一。
+                Crossfade(targetState = currentSong!!.picUrl, animationSpec = tween(600), label = "fullplayer bg cover") { bgUrl ->
+                    coil3.compose.AsyncImage(
+                        model = bgUrl,
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().graphicsLayer {
+                            val p = sheetProgressForBlur().coerceIn(0f, 1f)
+                            // 进度最后 10% 内连续淡入模糊，飞行主体阶段保持关闭
+                            val strength = ((p - 0.9f) / 0.1f).coerceIn(0f, 1f)
+                            renderEffect = if (strength > 0.01f)
+                                androidx.compose.ui.graphics.BlurEffect(coverBlurPx * strength, coverBlurPx * strength)
+                            else null
+                        }
+                    )
+                }
+                Box(Modifier.fillMaxSize().background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(listOf(
+                        androidx.compose.ui.graphics.Color.White.copy(alpha = .04f),
+                        androidx.compose.ui.graphics.Color.Transparent,
+                        androidx.compose.ui.graphics.Color.White.copy(alpha = .06f)))))
+                // ── 播放器 UI ──
+                    com.HyperX.MI.Na.cmx.CmxFullScreenPlayer(
                 currentSong = currentSong!!,
                 isPlaying = isPlaying,
                 isLooping = isLooping,
                 currentPosition = currentPosition,
                 duration = duration,
                 lyrics = currentLyrics,
+                lyricsSettled = lyricsSettled,
                 currentLyricIndex = currentLyricIndex,
                 onPlayPause = { viewModel.togglePlayPause() },
                 onNext = { viewModel.playNext() },
                 onPrevious = { viewModel.playPrevious() },
                 onToggleLoop = { viewModel.toggleLooping() },
                 onSeek = { viewModel.seekTo(it) },
-                onDismiss = { viewModel.isConsoleFullScreen = false },
+                onDismiss = { cmxSheet.requestClose() },
                 backdrop = fullBackdrop,
-                backgroundImageUri = viewModel.customBackgroundUri ?: viewModel.backgroundImageUri,
+                backgroundImageUri = null,  // 全屏页背景 = 封面模糊图 ✓ 不用自定义壁纸 ✓
                 onAddToFavorites = { viewModel.addToFavorites(currentSong!!) },
                 onAddToPlaylist = { song -> showAddToPlaylist = song },
                 onDownload = { viewModel.downloadSong(currentSong!!) },
@@ -3928,8 +4188,11 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
             }
         }
 
-        AnimatedVisibility(visible = activeSubPage == "custom_center", enter = subPageEnter, exit = subPageExit) {
-            Box(modifier = Modifier.fillMaxSize().miuixLayerBackdrop(ksuBackdrop)) {
+        FoldEnterHost(visible = activeSubPage == "custom_center") {
+            // 不再把子页注册进 glassBackdrop：该 backdrop 是单图层（后写覆盖先写），
+            // 子页注册会抢走导航栏玻璃的采样源，折叠动画期间 3D 变换 + 图层重写
+            // 造成采样失效 → 导航栏变黑。子页自身玻璃用 fullBackdrop，不受影响。
+            Box(modifier = Modifier.fillMaxSize()) {
             ThemeAndPersonalizationScreen(
                 viewModel = viewModel,
                 backdrop = fullBackdrop,
@@ -3937,8 +4200,8 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
             )
             }
         }
-        AnimatedVisibility(visible = activeSubPage == "nav_settings", enter = subPageEnter, exit = subPageExit) {
-            Box(modifier = Modifier.fillMaxSize().miuixLayerBackdrop(ksuBackdrop)) {
+        FoldEnterHost(visible = activeSubPage == "nav_settings") {
+            Box(modifier = Modifier.fillMaxSize()) {
             NavigationBarSettingsScreen(
                 viewModel = viewModel,
                 onBack = { activeSubPage = null },
@@ -3946,8 +4209,8 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
             )
             }
         }
-                AnimatedVisibility(visible = activeSubPage == "color_palette", enter = subPageEnter, exit = subPageExit) {
-            Box(modifier = Modifier.fillMaxSize().miuixLayerBackdrop(ksuBackdrop)) {
+                FoldEnterHost(visible = activeSubPage == "color_palette") {
+            Box(modifier = Modifier.fillMaxSize()) {
             ColorPaletteScreen(
                 viewModel = viewModel,
                 onBack = { activeSubPage = null },
@@ -3955,18 +4218,34 @@ fun MainNavigationScreen(viewModel: PlayerViewModel = viewModel()) {
             )
             }
         }
-        AnimatedVisibility(visible = activeSubPage == "history", enter = subPageEnter, exit = subPageExit) {
+        FoldEnterHost(visible = activeSubPage == "history") {
             // 补一层主题底色：这两个页面自身是透明容器，只靠 backdrop 出效果，
             // backdrop 没就绪时会整页透明，加底色兜底最稳。
-            Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).miuixLayerBackdrop(ksuBackdrop)) {
-                HistoryScreen(viewModel = viewModel, backdrop = backgroundBackdrop, onBack = { activeSubPage = null })
+            Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                HistoryScreen(viewModel = viewModel, backdrop = backgroundBackdrop, onBack = { activeSubPage = null },
+                    onOpenFootprint = { activeSubPage = "footprint" })
             }
         }
-        AnimatedVisibility(visible = activeSubPage == "playlists", enter = subPageEnter, exit = subPageExit) {
+        FoldEnterHost(visible = activeSubPage == "playlists") {
             // 同上：歌单页自身不画背景，这里兜底一层底色，避免"背景透明"
-            Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).miuixLayerBackdrop(ksuBackdrop)) {
-                PlaylistScreen(viewModel = viewModel, onBack = { activeSubPage = null }, backdrop = backgroundBackdrop)
+            Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                PlaylistScreen(
+                    viewModel = viewModel,
+                    onBack = { activeSubPage = null },
+                    backdrop = backgroundBackdrop,
+                    // 听歌足迹入口：入口胶囊在歌单页顶部，点开进足迹页（数据在 stats 包本地维护）
+                    onOpenFootprint = { activeSubPage = "footprint" }
+                )
             }
+        }
+        FoldEnterHost(visible = activeSubPage == "footprint") {
+            FootprintScreen(onBack = { activeSubPage = null })
+        }
+        FoldEnterHost(visible = activeSubPage == "audio_quality") {
+            AudioQualityScreen(
+                backdrop = fullBackdrop,
+                onBack = { activeSubPage = null }
+            )
         }
 
     }
@@ -3982,575 +4261,6 @@ private fun GuideStep(number: String, text: String) {
         }
         Spacer(Modifier.width(12.dp))
         Text(text, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun FullScreenPlayer(
-    currentSong: Song,
-    isPlaying: Boolean,
-    isLooping: Boolean,
-    currentPosition: Long,
-    duration: Long,
-    lyrics: LyricData,
-    currentLyricIndex: Int,
-    onPlayPause: () -> Unit,
-    onNext: () -> Unit,
-    onPrevious: () -> Unit,
-    onToggleLoop: () -> Unit,
-    onSeek: (Long) -> Unit,
-    onDismiss: () -> Unit,
-    backdrop: Backdrop,
-    backgroundImageUri: Any?,
-    onAddToFavorites: (() -> Unit)? = null,
-    onAddToPlaylist: ((Song) -> Unit)? = null,
-    onDownload: (() -> Unit)? = null,
-    onShare: (() -> Unit)? = null
-) {
-    var showLyrics by remember { mutableStateOf(false) }
-    var showMenu by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
-    val configuration = LocalConfiguration.current
-    val screenHeight = configuration.screenHeightDp.dp
-    val lyricHalf = screenHeight / 2
-
-    LaunchedEffect(currentLyricIndex, showLyrics) {
-        if (showLyrics && currentLyricIndex >= 0 && lyrics.times.isNotEmpty()) {
-            listState.animateScrollToItem(
-                index = maxOf(currentLyricIndex, 0),
-                scrollOffset = 0
-            )
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                if (backgroundImageUri != null || currentSong.picUrl.isNotEmpty()) MaterialTheme.colorScheme.surfaceContainerLowest
-                else MaterialTheme.colorScheme.background
-            )
-    ) {
-
-        // 换源解析的瞬间 picUrl 可能短暂为空，用"稳定封面"避免背景闪空
-        val stableCover = rememberStableCover(currentSong.picUrl)
-        val bgModel = when {
-            stableCover.isNotEmpty() -> stableCover
-            backgroundImageUri != null -> backgroundImageUri
-            else -> null
-        }
-        if (bgModel != null) {
-            AsyncImage(
-                model = bgModel,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().blur(30.dp)
-            )
-        } else {
-            // 无封面且无自定义背景：用统一封面占位图做模糊底（原为随机网图）
-            Image(
-                painter = painterResource(R.drawable.fallback_cover),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().blur(30.dp)
-            )
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.White.copy(alpha = 0.10f))
-        )
-        // 竖向渐变：上下稍暗、中间透亮 —— 白字更清楚，画面也更有层次
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = 0.30f),
-                        0.30f to Color.Transparent,
-                        0.70f to Color.Transparent,
-                        1f to Color.Black.copy(alpha = 0.46f)
-                    )
-                )
-        )
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .navigationBarsPadding()
-                .statusBarsPadding()
-                .padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-                        Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onDismiss, modifier = Modifier.size(44.dp)) {
-                    Icon(
-                        Icons.Rounded.KeyboardArrowDown,
-                        "收起",
-                        tint = Color.White,
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
-                Text(
-                    if (showLyrics) "歌词" else "正在播放",
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Box {
-                    IconButton(onClick = { showMenu = true }, modifier = Modifier.size(44.dp)) {
-                        Icon(
-                            Icons.Rounded.MoreVert,
-                            "更多",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false },
-                        containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(6.dp),
-                        shape = RoundedCornerShape(20.dp)
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("收藏到列表") },
-                            leadingIcon = { Icon(Icons.Rounded.FavoriteBorder, null) },
-                            onClick = {
-                                showMenu = false
-                                onAddToFavorites?.invoke()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("添加进歌单") },
-                            leadingIcon = { Icon(Icons.Rounded.PlaylistAdd, null) },
-                            onClick = {
-                                showMenu = false
-                                onAddToPlaylist?.invoke(currentSong)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("下载音乐") },
-                            leadingIcon = { Icon(Icons.Rounded.Download, null) },
-                            onClick = {
-                                showMenu = false
-                                onDownload?.invoke()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("分享") },
-                            leadingIcon = { Icon(Icons.Rounded.Share, null) },
-                            onClick = {
-                                showMenu = false
-                                onShare?.invoke()
-                            }
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(24.dp))
-
-            AnimatedContent(
-                targetState = showLyrics,
-                transitionSpec = {
-                    (fadeIn(Motion.enter()) + slideInHorizontally(Motion.enter()) { it / 8 }) togetherWith
-                            (fadeOut(Motion.exit()) + slideOutHorizontally(Motion.exit()) { -it / 8 })
-                },
-                label = "contentSwitch"
-            ) { isLyrics ->
-
-                if (!isLyrics) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Spacer(Modifier.height(12.dp))
-
-                        // 封面：播放时轻微"呼吸"放大，配柔和投影与顶部玻璃高光
-                        val coverScale by animateFloatAsState(
-                            targetValue = if (isPlaying) 1f else 0.955f,
-                            animationSpec = spring(dampingRatio = 0.75f, stiffness = 220f),
-                            label = "coverScale"
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(0.8f)
-                                .aspectRatio(1f)
-                                .scale(coverScale)
-                                .shadow(elevation = 26.dp, shape = RoundedCornerShape(28.dp), clip = false)
-                                .clip(RoundedCornerShape(28.dp))
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null
-                                ) {
-                                    if (lyrics.times.isNotEmpty()) showLyrics = true
-                                }
-                        ) {
-                            val coverModel = rememberStableCover(currentSong.picUrl)
-                            if (coverModel.isNotEmpty()) {
-                                AsyncImage(
-                                    model = coverModel,
-                                    contentDescription = "Album Art",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } else {
-                                // 无封面兜底：统一封面占位图（原为随机网图）
-                                Image(
-                                    painter = painterResource(R.drawable.fallback_cover),
-                                    contentDescription = "Album Art",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(
-                                        Brush.verticalGradient(
-                                            0f to Color.White.copy(alpha = 0.12f),
-                                            0.45f to Color.Transparent,
-                                            1f to Color.Black.copy(alpha = 0.20f)
-                                        )
-                                    )
-                            )
-                        }
-
-                        Spacer(Modifier.height(28.dp))
-
-                        Text(
-                            text = currentSong.name,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = currentSong.artist,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = Color.White.copy(alpha = 0.72f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            letterSpacing = 0.6.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Spacer(Modifier.height(24.dp))
-
-                        if (lyrics.times.isNotEmpty() && currentLyricIndex >= 0) {
-                            val time = lyrics.times[currentLyricIndex]
-                            val text = lyrics.lyrics[time] ?: ""
-                            val trans = lyrics.translations[time]
-
-                            AnimatedContent(
-                                targetState = "$text|${trans ?: ""}",
-                                transitionSpec = {
-                                    (fadeIn(Motion.enter()) + slideInVertically(Motion.enter()) { it / 3 }) togetherWith
-                                            (fadeOut(Motion.exit()) + slideOutVertically(Motion.exit()) { -it / 3 })
-                                },
-                                label = "lyricPreview"
-                            ) { content ->
-                                val parts = content.split("|")
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .clickable(
-                                            interactionSource = remember { MutableInteractionSource() },
-                                            indication = null
-                                        ) { showLyrics = true },
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Text(
-                                        parts.getOrNull(0) ?: "",
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = Color.White,
-                                        textAlign = TextAlign.Center,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (parts.size > 1 && parts[1].isNotEmpty()) {
-                                        Spacer(Modifier.height(3.dp))
-                                        Text(
-                                            parts[1],
-                                            fontSize = 13.sp,
-                                            color = Color.White.copy(alpha = 0.65f),
-                                            textAlign = TextAlign.Center,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                            }
-                        } else if (lyrics.times.isNotEmpty() || lyrics.lyrics.isNotEmpty()) {
-                            // 有歌词、只是还没唱到第一句（前奏/间奏）→ 不是"纯音乐"
-                            Text(
-                                "等待前奏…",
-                                color = Color.White.copy(alpha = 0.5f),
-                                fontSize = 14.sp
-                            )
-                        } else {
-                            Text(
-                                if (lyrics.instrumental) "纯音乐，请欣赏" else "暂无歌词",
-                                color = Color.White.copy(alpha = 0.5f),
-                                fontSize = 14.sp
-                            )
-                        }
-
-                        Spacer(Modifier.weight(1f))
-
-                        if (ProgressStylePrefs.waveEnabled(androidx.compose.ui.platform.LocalContext.current)) {
-                            TadpoleWaveSlider(
-                                                        value = currentPosition.toFloat(),
-                                                        onValueChange = { onSeek(it.toLong()) },
-                                                        valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        activeColor = Color.White,
-                                                        inactiveColor = Color.White.copy(alpha = 0.25f),
-                                                        thumbColor = Color.White
-                                                    )
-                        } else {
-                            Slider(
-                                                        value = currentPosition.toFloat(),
-                                                        onValueChange = { onSeek(it.toLong()) },
-                                                        valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.25f)),
-                                                    )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                formatDuration(currentPosition),
-                                fontSize = 11.sp,
-                                color = Color.White.copy(alpha = 0.7f)
-                            )
-                            Text(
-                                formatDuration(duration),
-                                fontSize = 11.sp,
-                                color = Color.White.copy(alpha = 0.7f)
-                            )
-                        }
-
-                        Spacer(Modifier.height(20.dp))
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 16.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(onClick = onToggleLoop, modifier = Modifier.size(48.dp)) {
-                                Icon(
-                                    if (isLooping) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
-                                    null,
-                                    tint = if (isLooping) Color.White else Color.White.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(26.dp)
-                                )
-                            }
-                            IconButton(onClick = onPrevious, modifier = Modifier.size(56.dp)) {
-                                Icon(
-                                    Icons.Rounded.SkipPrevious,
-                                    null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            FilledIconButton(
-                                onClick = onPlayPause,
-                                modifier = Modifier.size(72.dp),
-                                colors = IconButtonDefaults.filledIconButtonColors(
-                                    containerColor = Color.White,
-                                    contentColor = Color.Black
-                                )
-                            ) {
-                                Icon(
-                                    if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    null,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            IconButton(onClick = onNext, modifier = Modifier.size(56.dp)) {
-                                Icon(
-                                    Icons.Rounded.SkipNext,
-                                    null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            IconButton(onClick = {}, modifier = Modifier.size(48.dp)) {
-                                Icon(
-                                    Icons.Rounded.Shuffle,
-                                    null,
-                                    tint = Color.White.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(26.dp)
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        if (lyrics.times.isNotEmpty()) {
-                            LazyColumn(
-                                state = listState,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                item { Spacer(Modifier.height(lyricHalf)) }
-                                itemsIndexed(lyrics.times) { index, time ->
-                                    val isCurrent = index == currentLyricIndex
-                                    val text = lyrics.lyrics[time] ?: ""
-                                    val trans = lyrics.translations[time]
-
-                                    val textColor by animateColorAsState(
-                                        targetValue = if (isCurrent) Color.White
-                                        else Color.White.copy(alpha = 0.32f),
-                                        animationSpec = tween(500),
-                                        label = "lyricColor"
-                                    )
-                                    val scale by animateFloatAsState(
-                                        targetValue = if (isCurrent) 1.12f else 1f,
-                                        animationSpec = spring(dampingRatio = 0.7f, stiffness = 240f),
-                                        label = "lyricScale"
-                                    )
-                                    val baseSize = 18f
-
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .graphicsLayer {
-                                                scaleX = scale
-                                                scaleY = scale
-                                            }
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .clickable { onSeek(time) }
-                                            .padding(vertical = 14.dp, horizontal = 32.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                            Text(
-                                                text = text,
-                                                fontSize = baseSize.sp,
-                                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                                                color = textColor,
-                                                textAlign = TextAlign.Center,
-                                                lineHeight = (baseSize * 1.4f).sp
-                                            )
-                                            if (!trans.isNullOrEmpty()) {
-                                                Spacer(Modifier.height(4.dp))
-                                                Text(
-                                                    text = trans,
-                                                    fontSize = if (isCurrent) 14.sp else 12.sp,
-                                                    color = if (isCurrent) Color.White.copy(alpha = 0.7f)
-                                                    else Color.White.copy(alpha = 0.25f),
-                                                    textAlign = TextAlign.Center
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                                item { Spacer(Modifier.height(lyricHalf)) }
-                            }
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    if (lyrics.instrumental) "纯音乐，请欣赏" else "暂无歌词",
-                                    color = Color.White.copy(alpha = 0.4f),
-                                    fontSize = 16.sp
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.height(20.dp))
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 16.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(onClick = onToggleLoop, modifier = Modifier.size(48.dp)) {
-                                Icon(
-                                    if (isLooping) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
-                                    null,
-                                    tint = if (isLooping) Color.White else Color.White.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(26.dp)
-                                )
-                            }
-                            IconButton(onClick = onPrevious, modifier = Modifier.size(56.dp)) {
-                                Icon(
-                                    Icons.Rounded.SkipPrevious,
-                                    null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            FilledIconButton(
-                                onClick = onPlayPause,
-                                modifier = Modifier.size(72.dp),
-                                colors = IconButtonDefaults.filledIconButtonColors(
-                                    containerColor = Color.White,
-                                    contentColor = Color.Black
-                                )
-                            ) {
-                                Icon(
-                                    if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    null,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            IconButton(onClick = onNext, modifier = Modifier.size(56.dp)) {
-                                Icon(
-                                    Icons.Rounded.SkipNext,
-                                    null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            IconButton(onClick = {}, modifier = Modifier.size(48.dp)) {
-                                Icon(
-                                    Icons.Rounded.Shuffle,
-                                    null,
-                                    tint = Color.White.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(26.dp)
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -4577,7 +4287,7 @@ fun MusicSearchTab(
             song = targetSong,
             onDismiss = { showAddToPlaylist = null },
             onAdded = { pl ->
-                val psong = PlaylistSong(id = targetSong.id, name = targetSong.name, artist = targetSong.artist, picUrl = targetSong.picUrl)
+                val psong = PlaylistSong(id = targetSong.id, name = targetSong.name, artist = targetSong.artist, picUrl = targetSong.picUrl, source = targetSong.source)
                 PlaylistStore.savePlaylist(ctxAtp, pl.copy(songs = pl.songs + psong))
                 showAddToPlaylist = null
                 AppToast.show("已加入「" + pl.name + "」")
@@ -4617,7 +4327,8 @@ fun MusicSearchTab(
         }
     }
 
-    if (showHistoryDialog) {
+    // 弹窗统一折叠动效：FoldEnterHost 持有 Dialog，进场折叠展开、退场反向折叠后卸载窗口
+    FoldEnterHost(visible = showHistoryDialog) {
         Dialog(
             onDismissRequest = { showHistoryDialog = false },
             properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -4637,18 +4348,13 @@ fun MusicSearchTab(
                         .then(
                             if (LocalMd3Style.current)
                                 Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(32.dp))
-                            else Modifier.drawBackdrop(
-                                backdrop = backdrop,
-                                shape = { RoundedCornerShape(32.dp) },
-                                effects = {
-                                    vibrancy()
-                                    blur(8f.dp.toPx())
-                                    lens(24f.dp.toPx(), 48f.dp.toPx(), depthEffect = true)
-                                },
-                                highlight = { Highlight.Plain },
-                                shadow = { Shadow(alpha = 0.25f) },
-                                innerShadow = { InnerShadow(radius = 12f.dp, alpha = 0.06f) }
-                            )
+                            // 新液态（对齐排序芯片）：半透明白 .14 面 + 白 .26 细描边，去 kyant 老液态管线
+                            else Modifier.run {
+                                val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
+                                drawBackdrop(backdrop, shape = { RoundedCornerShape(32.dp) },
+                                    effects = { blur(18f.dp.toPx()) },
+                                    onDrawSurface = { drawRect(frost) })
+                            }
                         )
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(32.dp))
@@ -4721,10 +4427,11 @@ fun MusicSearchTab(
                                 .heightIn(max = 400.dp)
                                 .padding(horizontal = 16.dp)
                         ) {
-                            itemsIndexed(searchHistory, key = { _, h -> h }) { _, historyKey ->
+                            itemsIndexed(searchHistory, key = { _, h -> h }) { idx, historyKey ->
                                 Surface(
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .listItemEnter(idx)
                                         .padding(vertical = 3.dp),
                                     shape = RoundedCornerShape(14.dp),
                                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -4813,19 +4520,13 @@ fun MusicSearchTab(
                     .then(
                         if (LocalMd3Style.current)
                             Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedCornerShape(searchCornerRadius))
-                        else Modifier.drawBackdrop(
-                            backdrop = backdrop,
-                            shape = { RoundedCornerShape(searchCornerRadius) },
-                            effects = {
-                                vibrancy()
-                                blur(if (isSearchFocused) 14f.dp.toPx() else 10f.dp.toPx())
-                                lens(16f.dp.toPx(), 24f.dp.toPx())
-                            },
-                            highlight = {
-                                Highlight.Default.copy(alpha = if (isSearchFocused) 0.7f else 0.45f)
-                            },
-                            shadow = { Shadow(alpha = 0.1f) }
-                        )
+                        // 液态搜索框：统一 0.60 主题磨砂，避免聚焦后泛白
+                        else Modifier.run {
+                            val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
+                            drawBackdrop(backdrop, shape = { RoundedCornerShape(searchCornerRadius) },
+                                effects = { blur(14f.dp.toPx()) },
+                                onDrawSurface = { drawRect(frost) })
+                        }
                     )
                     .clip(RoundedCornerShape(searchCornerRadius))
             ) {
@@ -4843,15 +4544,15 @@ fun MusicSearchTab(
                     decorationBox = { innerTextField ->
                         Row(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).clickable { showHistoryDialog = true }, contentAlignment = Alignment.Center) {
-                                Icon(Icons.Rounded.History, null, tint = if (isSearchFocused || showHistoryDialog) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), modifier = Modifier.size(22.dp))
+                                Icon(Icons.Rounded.History, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
                             }
                             Spacer(modifier = Modifier.width(8.dp))
                             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                                if (searchText.isEmpty()) Text("搜索歌曲、歌手", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), fontSize = 15.sp)
+                                if (searchText.isEmpty()) Text("搜索歌曲、歌手", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.60f), fontSize = 15.sp)
                                 innerTextField()
                             }
                             if (searchText.isNotEmpty()) {
-                                IconButton(onClick = { searchText = "" }, modifier = Modifier.size(28.dp)) { Icon(Icons.Rounded.Close, null, modifier = Modifier.size(16.dp)) }
+                                IconButton(onClick = { searchText = "" }, modifier = Modifier.size(28.dp)) { Icon(Icons.Rounded.Close, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp)) }
                             }
                         }
                     }
@@ -5004,26 +4705,69 @@ fun MusicSearchTab(
                                 ) {
                                     listOf("倒序" to true, "正序" to false).forEach { (label, desc) ->
                                         val on = searchSortDesc == desc
+                                        val sortFrost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
                                         val bg by animateColorAsState(
                                             targetValue = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
                                             animationSpec = tween(220), label = "sortBg"
                                         )
                                         val fg by animateColorAsState(
-                                            targetValue = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            targetValue = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                             animationSpec = tween(220), label = "sortFg"
                                         )
                                         val pad by animateDpAsState(
                                             targetValue = if (on) 14.dp else 12.dp,
                                             animationSpec = spring(dampingRatio = 0.7f, stiffness = 500f), label = "sortPad"
                                         )
-                                        Box(
-                                            modifier = Modifier
+                                        val pressS = com.HyperX.MI.Na.nativeui.rememberElasticPressState()
+                                        val interS = remember { MutableInteractionSource() }
+                                        val jellyS = remember { Animatable(1f) }
+                                        LaunchedEffect(pressS) {
+                                            snapshotFlow { pressS.amount > .45f }.distinctUntilChanged().collect { down ->
+                                                if (down) jellyS.animateTo(.92f, spring(dampingRatio = .62f, stiffness = 620f))
+                                                else {
+                                                    jellyS.animateTo(1.06f, spring(dampingRatio = .38f, stiffness = 380f))
+                                                    jellyS.animateTo(1f, spring(dampingRatio = .55f, stiffness = 300f))
+                                                }
+                                            }
+                                        }
+                                        com.HyperX.MI.Na.nativeui.ElasticPress(
+                                            Modifier
                                                 .clip(RoundedCornerShape(50))
-                                                .background(bg)
-                                                .clickable { searchSortDesc = desc }
-                                                .padding(horizontal = pad, vertical = 6.dp)
+                                                .clickable(
+                                                    interactionSource = interS, indication = null,
+                                                    onClick = { searchSortDesc = desc }
+                                                ),
+                                            state = pressS,
+                                            draggable = false,
                                         ) {
-                                            Text(label, fontSize = 12.sp, color = fg)
+                                            Box(
+                                                modifier = Modifier
+                                                    .graphicsLayer {
+                                                        val amount = pressS.amount.coerceIn(0f, 1f)
+                                                        val net = jellyS.value / (1f + amount * .08f)
+                                                        scaleX = net; scaleY = net
+                                                    }
+                                                    .clip(RoundedCornerShape(50))
+                                                    .then(
+                                                        if (LocalMd3Style.current) Modifier.background(bg)
+                                                        else Modifier.drawBackdrop(
+                                                            backdrop = backdrop,
+                                                            shape = { RoundedCornerShape(50) },
+                                                            effects = { blur(14f.dp.toPx()) },
+                                                            onDrawSurface = { drawRect(sortFrost) }
+                                                        )
+                                                    )
+                                                    .drawBehind {
+                                                        if (pressS.amount > 0f) drawRect(Color.White.copy(alpha = .08f * pressS.amount.coerceIn(0f, 1f)))
+                                                    }
+                                                    .clickable(
+                                                        interactionSource = interS, indication = null,
+                                                        onClick = { searchSortDesc = desc }
+                                                    )
+                                                    .padding(horizontal = pad, vertical = 6.dp)
+                                            ) {
+                                                Text(label, fontSize = 12.sp, color = fg)
+                                            }
                                         }
                                     }
                                 }
@@ -5038,20 +4782,23 @@ fun MusicSearchTab(
                                         .joinToString("\u0001").lowercase()
                                 }
                             ) { index, song ->
-                                SongItem(
-                                    song = song,
-                                    onAddToPlaylist = { s -> showAddToPlaylist = s },
-                                    onLongPress = { selectedSong -> showAddToPlaylist = selectedSong },
-                                    isCurrentSong = song.id == currentSong?.id,
-                                    isPlaying = isPlaying,
-                                    isFirst = index == 0,
-                                    isLast = index == sortedSearchResults.size - 1,
-                                    onClick = { viewModel.playSong(song, sortedSearchResults) },
-                                    viewModel = viewModel,
-                                    backdrop = backdrop,
-                                    isInFavorites = false,
-                                    onRemoveFromFavorites = null
-                                )
+                                // 列表项错峰入场（alpha+上浮 240ms，按 index 32ms 错峰，上限 10 项）：与收藏/历史列表节奏一致
+                                Box(modifier = Modifier.fillMaxWidth().listItemEnter(index)) {
+                                    SongItem(
+                                        song = song,
+                                        onAddToPlaylist = { s -> showAddToPlaylist = s },
+                                        onLongPress = { selectedSong -> showAddToPlaylist = selectedSong },
+                                        isCurrentSong = song.id == currentSong?.id,
+                                        isPlaying = isPlaying,
+                                        isFirst = index == 0,
+                                        isLast = index == sortedSearchResults.size - 1,
+                                        onClick = { viewModel.playSong(song, sortedSearchResults) },
+                                        viewModel = viewModel,
+                                        backdrop = backdrop,
+                                        isInFavorites = false,
+                                        onRemoveFromFavorites = null
+                                    )
+                                }
                             }
                             // ── 加载更多：同一关键词请求下一页并追加到列表末尾 ──
                             // 展示层是「整体倒序」，所以追加后新结果自动出现在列表最前面(?)——
@@ -5115,7 +4862,7 @@ fun SearchLiquidButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector = Icons.Rounded.Search,
     modifier: Modifier = Modifier
 ) {
-        if (LocalMd3Style.current) {
+    if (LocalMd3Style.current) {
         androidx.compose.material3.Button(
             onClick = onClick,
             shape = shape,
@@ -5128,57 +4875,53 @@ fun SearchLiquidButton(
         return
     }
     val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
-        targetValue = if (isPressed) 0.94f else 1f,
-        animationSpec = spring(dampingRatio = 0.45f, stiffness = 500f),
-        label = "SearchBtnPress"
-    )
+    val pressS = com.HyperX.MI.Na.nativeui.rememberElasticPressState()
+    val jellyS = remember { Animatable(1f) }
+    val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
+    val ink = MaterialTheme.colorScheme.onSurface
+    LaunchedEffect(pressS) {
+        snapshotFlow { pressS.amount > .45f }.distinctUntilChanged().collect { down ->
+            if (down) jellyS.animateTo(.92f, spring(dampingRatio = .62f, stiffness = 620f))
+            else {
+                jellyS.animateTo(1.06f, spring(dampingRatio = .38f, stiffness = 380f))
+                jellyS.animateTo(1f, spring(dampingRatio = .55f, stiffness = 300f))
+            }
+        }
+    }
 
-    val btnColor = MaterialTheme.colorScheme.primary
-
-    Row(
+    com.HyperX.MI.Na.nativeui.ElasticPress(
         modifier = modifier
             .height(52.dp)
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            }
-            .drawBackdrop(
-                backdrop = backdrop,
-                shape = { shape },
-                effects = {
-                    vibrancy()
-                    blur(4f.dp.toPx())
-                    lens(12f.dp.toPx(), 24f.dp.toPx())
-                },
-                highlight = {
-                    Highlight.Default.copy(alpha = if (isPressed) 0.9f else 0.6f)
-                },
-                shadow = { Shadow(alpha = 0.15f) },
-                layerBlock = {
-                    if (isPressed) {
-                        scaleX = 0.98f
-                        scaleY = 0.98f
-                    }
-                },
-                onDrawSurface = {
-                    drawRect(btnColor.copy(alpha = 0.85f))
-                }
-            )
             .clip(shape)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick
-            )
-            .padding(horizontal = 18.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
+            ),
+        state = pressS,
+        pullPastEdges = false
     ) {
-        Icon(icon, null, modifier = Modifier.size(18.dp), tint = Color.White)
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(label, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color.White)
+        Row(
+            modifier = Modifier
+                .fillMaxHeight()
+                .graphicsLayer {
+                    val amount = pressS.amount.coerceIn(0f, 1f)
+                    val net = jellyS.value / (1f + amount * .08f)
+                    scaleX = net; scaleY = net
+                }
+                .clip(shape)
+                .drawBackdrop(backdrop, shape = { shape },
+                    effects = { blur(12f.dp.toPx()) },
+                    onDrawSurface = { drawRect(frost) })
+                .drawBehind { if (pressS.amount > 0f) drawRect(ink.copy(alpha = .06f * pressS.amount.coerceIn(0f, 1f))) }
+                .padding(horizontal = 22.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(icon, null, modifier = Modifier.size(22.dp), tint = ink)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(label, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = ink)
+        }
     }
 }
 
@@ -5187,7 +4930,8 @@ fun SettingsThemeTab(
     viewModel: PlayerViewModel,
     backdrop: Backdrop,
     onNavigateToCustomCenter: () -> Unit,
-    onNavigateToColorPalette: () -> Unit
+    onNavigateToColorPalette: () -> Unit,
+    onNavigateToAudioQuality: () -> Unit
 ) {
     val scrollState = rememberScrollState()
     var showFloatLyrics by remember { mutableStateOf(false) }
@@ -5209,31 +4953,33 @@ fun SettingsThemeTab(
             fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.padding(start = 24.dp, top = 4.dp, bottom = 2.dp)
+            modifier = Modifier.listItemEnter(0).padding(start = 24.dp, top = 4.dp, bottom = 2.dp)
         )
 
-        if (LocalMd3Style.current) {
+            if (LocalMd3Style.current) {
 
             val ctx = androidx.compose.ui.platform.LocalContext.current
             var waveProgress by remember { mutableStateOf(ProgressStylePrefs.waveEnabled(ctx)) }
-                        KsuSegColumn {
+                        // 设置组整体入场：与液态玻璃分支同拍（FadeSlideIn 240ms 淡入+上浮）
+                        FadeSlideIn(modifier = Modifier.fillMaxWidth(), index = 1) {
+                        SegColumn {
                 val rememberLastOn by viewModel.rememberLast.collectAsState()
-                KsuSegClick(
-                    index = 0, count = 10,
+                SegClick(
+                    index = 0, count = 9,
                     icon = Icons.Outlined.Image,
                     title = "主题与个性化",
                     summary = "此风格暂不支持自定义壁纸",
                     onClick = onNavigateToCustomCenter
                 )
-                KsuSegClick(
-                    index = 1, count = 10,
+                SegClick(
+                    index = 1, count = 9,
                     icon = Icons.Rounded.Palette,
                     title = "主题与颜色",
                     summary = "可调整应用内大部分的主题设置与风格",
                     onClick = onNavigateToColorPalette
                 )
-                KsuSegSwitch(
-                    index = 2, count = 10,
+                SegSwitch(
+                    index = 2, count = 9,
                     icon = if (viewModel.isForceDarkMode) Icons.Rounded.DarkMode else Icons.Rounded.LightMode,
                     title = "暗色模式",
                     summary = "强制使用深色界面",
@@ -5243,8 +4989,8 @@ fun SettingsThemeTab(
                         viewModel.savePreferences()
                     }
                 )
-            KsuSegSwitch(
-                        index = 3, count = 10,
+            SegSwitch(
+                        index = 3, count = 9,
                         icon = Icons.Rounded.FormatColorText,
                         title = "文字变白",
                         summary = "仅文字转白，图标保持主题色，对抗暗色壁纸",
@@ -5254,8 +5000,8 @@ fun SettingsThemeTab(
                             viewModel.savePreferences()
                         }
                     )
-                KsuSegClick(
-                    index = 4, count = 10,
+                SegClick(
+                    index = 4, count = 9,
                     icon = Icons.Rounded.Lyrics,
                     title = "悬浮歌词（测试版）",
                     summary = "桌面歌词：可穿透、可调色、可调透明度",
@@ -5265,8 +5011,8 @@ fun SettingsThemeTab(
                     FloatingLyricsSettingsSheet(backdrop = backdrop, onDismiss = { showFloatLyrics = false })
                 }
 
-                KsuSegSwitch(
-                    index = 5, count = 10,
+                SegSwitch(
+                    index = 5, count = 9,
                     icon = Icons.Rounded.MusicNote,
                     title = "波浪进度条",
                     summary = "进度条样式",
@@ -5276,174 +5022,147 @@ fun SettingsThemeTab(
                         ProgressStylePrefs.setWaveEnabled(ctx, it)
                     }
                 )
-                KsuSegClick(
-                    index = 6, count = 10,
+                SegClick(
+                    index = 6, count = 9,
                     icon = Icons.Rounded.Equalizer,
                     title = "音乐偏好",
                     summary = "音乐类型 关注艺人（参与推荐打分）",
                     onClick = { showTastePrefs = true }
                 )
                 // 与「暗色模式」同样的卡片样式
-                KsuSegSwitch(
-                    index = 7, count = 10,
+                SegSwitch(
+                    index = 7, count = 9,
                     icon = Icons.Rounded.Restore,
                     title = "记住上次播放",
                     summary = "下次打开应用继续上次的歌与进度",
                     checked = rememberLastOn,
                     onCheckedChange = { on -> viewModel.setRememberLast(ctx, on) }
                 )
-                // 音质切换：先占位 + 标注"开发中"，让用户有个期待
-                KsuSegClick(
+                SegClick(
                     index = 8, count = 9,
                     icon = Icons.Rounded.Equalizer,
-                    title = "音质切换（开发中）",
-                    summary = "标准 / 高品 / 无损，正在开发中",
-                    onClick = {
-                        AppToast.show("音质切换正在开发中，敬请期待 🎧")
-                    }
+                    title = "音质切换",
+                    summary = "当前：" + AudioQuality.label() + "，点击进入音质选择",
+                    onClick = onNavigateToAudioQuality
                 )
                 if (showTastePrefs) {
                     MusicTasteSettingsSheet(backdrop = backdrop, onDismiss = { showTastePrefs = false })
                 }
             }
-        } else {
-                    SettingsGlassCard(modifier = Modifier.padding(horizontal = 16.dp), backdrop = backdrop, onClick = onNavigateToCustomCenter) {
-            Icon(Icons.Outlined.Image, null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("主题与个性化", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                // 液态玻璃风格（md3Style = false）支持自定义壁纸：主界面会绘制自定义背景（isCustomBackgroundEnabled && !md3Style），
-                // 此前误标「暂不支持」，已修正为支持文案
-                Text("支持自定义壁纸与横幅，点击前往设置", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-                SettingsGlassCard(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    backdrop = backdrop,
-                    onClick = { showFloatLyrics = true }
-                ) {
-                    Icon(Icons.Rounded.Lyrics, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("悬浮歌词（测试版）", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text("桌面歌词：可穿透、可调色、可调透明度", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-
-                if (showFloatLyrics) {
-                    FloatingLyricsSettingsSheet(backdrop = backdrop, onDismiss = { showFloatLyrics = false })
-                }
-
-                val ctx2 = LocalContext.current
-                SettingsGlassCard(modifier = Modifier.padding(horizontal = 16.dp), backdrop = backdrop, onClick = {
-                    AppToast.show("音质切换正在开发中，敬请期待 🎧")
-                }) {
-                    Icon(Icons.Rounded.Equalizer, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("音质切换（开发中）", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text("标准 / 高品 / 无损，正在开发中", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-
-                SettingsGlassCard(modifier = Modifier.padding(horizontal = 16.dp), backdrop = backdrop, onClick = {}) {
-                    val rememberOn by viewModel.rememberLast.collectAsState()
-                    val ctxL = LocalContext.current
-                    Icon(Icons.Rounded.Restore, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("记住上次播放", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text("下次打开应用继续上次的歌与进度", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    LiquidToggleSwitch(checked = rememberOn, onCheckedChange = { on -> viewModel.setRememberLast(ctxL, on) }, backdrop = backdrop)
-                }
-
-                SettingsGlassCard(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    backdrop = backdrop,
-                    onClick = { showTastePrefs = true }
-                ) {
-                    Icon(Icons.Rounded.Equalizer, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("音乐偏好", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text("音乐类型 关注艺人（参与推荐打分）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-
-                if (showTastePrefs) {
-                    MusicTasteSettingsSheet(backdrop = backdrop, onDismiss = { showTastePrefs = false })
-                }
-
-                SettingsGlassCard(modifier = Modifier.padding(horizontal = 16.dp), backdrop = backdrop, onClick = onNavigateToColorPalette) {
-            Icon(Icons.Rounded.Palette, null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("主题与颜色", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                Text("可调整应用内大部分的主题设置与风格", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        SettingsGlassCard(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            backdrop = backdrop,
-            onClick = {
-                viewModel.isForceDarkMode = !viewModel.isForceDarkMode
-                viewModel.savePreferences()
-            }
-        ) {
-            Icon(
-                if (viewModel.isForceDarkMode) Icons.Rounded.DarkMode else Icons.Rounded.LightMode,
-                null,
-                tint = MaterialTheme.colorScheme.primary
-            )
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("暗色模式", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                Text("强制使用深色界面", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            LiquidToggleSwitch(
-                checked = viewModel.isForceDarkMode,
-                onCheckedChange = {
-                    viewModel.isForceDarkMode = it
-                    viewModel.savePreferences()
-                },
-                backdrop = backdrop
-            )
-        }
-
-            SettingsGlassCard(
-            modifier = Modifier.padding(horizontal = 16.dp),
-                backdrop = backdrop,
-                onClick = {
-                    viewModel.whiteTextMode = !viewModel.whiteTextMode
-                    viewModel.savePreferences()
-                }
-            ) {
-                Icon(Icons.Rounded.FormatColorText, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("文字变白", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                    Text("仅文字转白，图标保持主题色，对抗暗色壁纸", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                LiquidToggleSwitch(
-                    checked = viewModel.whiteTextMode,
-                    onCheckedChange = {
-                        viewModel.whiteTextMode = it
-                        viewModel.savePreferences()
-                    },
-                    backdrop = backdrop
+            } else {
+                // 液态材质：同一套 MD3 设置组件，表面换半透明玻璃色
+                val liquidScheme = MaterialTheme.colorScheme.copy(
+                    surface = MaterialTheme.colorScheme.surface,
+                    surfaceContainer = MaterialTheme.colorScheme.surfaceContainer,
+                    surfaceContainerLow = MaterialTheme.colorScheme.surfaceContainerLow,
+                    surfaceContainerLowest = MaterialTheme.colorScheme.surfaceContainerLowest,
+                    surfaceContainerHigh = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    surfaceContainerHighest = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    // 组件本身液态：每行表面直接是半透明磨砂玻璃色，无外层容器
+                    surfaceBright = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f),
+                    surfaceDim = MaterialTheme.colorScheme.surfaceDim
                 )
+                CompositionLocalProvider(LocalMd3Backdrop provides backdrop) {
+                MaterialTheme(colorScheme = liquidScheme) {
+
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                var waveProgress by remember { mutableStateOf(ProgressStylePrefs.waveEnabled(ctx)) }
+                            // 设置组整体入场：与液态玻璃分支同拍（FadeSlideIn 240ms 淡入+上浮）
+                            FadeSlideIn(modifier = Modifier.fillMaxWidth(), index = 1) {
+                            SegColumn {
+                    val rememberLastOn by viewModel.rememberLast.collectAsState()
+                    SegClick(
+                        index = 0, count = 9,
+                        icon = Icons.Outlined.Image,
+                        title = "主题与个性化",
+                        summary = "此风格暂不支持自定义壁纸",
+                        onClick = onNavigateToCustomCenter
+                    )
+                    SegClick(
+                        index = 1, count = 9,
+                        icon = Icons.Rounded.Palette,
+                        title = "主题与颜色",
+                        summary = "可调整应用内大部分的主题设置与风格",
+                        onClick = onNavigateToColorPalette
+                    )
+                    SegSwitch(
+                        index = 2, count = 9,
+                        icon = if (viewModel.isForceDarkMode) Icons.Rounded.DarkMode else Icons.Rounded.LightMode,
+                        title = "暗色模式",
+                        summary = "强制使用深色界面",
+                        checked = viewModel.isForceDarkMode,
+                        onCheckedChange = {
+                            viewModel.isForceDarkMode = it
+                            viewModel.savePreferences()
+                        }
+                    )
+                SegSwitch(
+                            index = 3, count = 9,
+                            icon = Icons.Rounded.FormatColorText,
+                            title = "文字变白",
+                            summary = "仅文字转白，图标保持主题色，对抗暗色壁纸",
+                            checked = viewModel.whiteTextMode,
+                            onCheckedChange = {
+                                viewModel.whiteTextMode = it
+                                viewModel.savePreferences()
+                            }
+                        )
+                    SegClick(
+                        index = 4, count = 9,
+                        icon = Icons.Rounded.Lyrics,
+                        title = "悬浮歌词（测试版）",
+                        summary = "桌面歌词：可穿透、可调色、可调透明度",
+                        onClick = { showFloatLyrics = true }
+                    )
+                    if (showFloatLyrics) {
+                        FloatingLyricsSettingsSheet(backdrop = backdrop, onDismiss = { showFloatLyrics = false })
+                    }
+
+                    SegSwitch(
+                        index = 5, count = 9,
+                        icon = Icons.Rounded.MusicNote,
+                        title = "波浪进度条",
+                        summary = "进度条样式",
+                        checked = waveProgress,
+                        onCheckedChange = {
+                            waveProgress = it
+                            ProgressStylePrefs.setWaveEnabled(ctx, it)
+                        }
+                    )
+                    SegClick(
+                        index = 6, count = 9,
+                        icon = Icons.Rounded.Equalizer,
+                        title = "音乐偏好",
+                        summary = "音乐类型 关注艺人（参与推荐打分）",
+                        onClick = { showTastePrefs = true }
+                    )
+                    // 与「暗色模式」同样的卡片样式
+                    SegSwitch(
+                        index = 7, count = 9,
+                        icon = Icons.Rounded.Restore,
+                        title = "记住上次播放",
+                        summary = "下次打开应用继续上次的歌与进度",
+                        checked = rememberLastOn,
+                        onCheckedChange = { on -> viewModel.setRememberLast(ctx, on) }
+                    )
+                    SegClick(
+                        index = 8, count = 9,
+                        icon = Icons.Rounded.Equalizer,
+                        title = "音质切换",
+                        summary = "当前：" + AudioQuality.label() + "，点击进入音质选择",
+                        onClick = onNavigateToAudioQuality
+                    )
+                    if (showTastePrefs) {
+                        MusicTasteSettingsSheet(backdrop = backdrop, onDismiss = { showTastePrefs = false })
+                    }
+                }
+                }
+                }
             }
-        }
 
             }
+}
 }
 
 @Composable
@@ -5989,8 +5708,8 @@ private fun FloatingLyricsSettingsSheet(
             // ── 悬浮窗权限提示 ──
             if (needOverlayPerm || (enabled && !hasOverlayPerm)) {
                 if (md3) {
-                    KsuSegColumn {
-                        KsuSegClick(
+                    SegColumn {
+                        SegClick(
                             index = 0, count = 1,
                             icon = Icons.Rounded.Warning,
                             title = "需要「显示在其他应用上层」权限",
@@ -6027,8 +5746,8 @@ private fun FloatingLyricsSettingsSheet(
 
             if (md3) {
                 // ══════════ MD3：与「主题与颜色」页完全一致的分段列表 ══════════
-                KsuSegColumn(title = "歌词显示") {
-                    KsuSegSwitch(
+                SegColumn(title = "歌词显示") {
+                    SegSwitch(
                         index = 0, count = 4,
                         icon = Icons.Rounded.Lyrics,
                         title = "启用悬浮歌词",
@@ -6036,7 +5755,7 @@ private fun FloatingLyricsSettingsSheet(
                         checked = enabled,
                         onCheckedChange = { applyEnabled(it) }
                     )
-                    KsuSegSwitch(
+                    SegSwitch(
                         index = 1, count = 4,
                         icon = Icons.Rounded.Palette,
                         title = "当前行跟随动态色",
@@ -6047,7 +5766,7 @@ private fun FloatingLyricsSettingsSheet(
                             FloatingLyricsPrefs.setUseAccentForCurrent(ctx, it)
                         }
                     )
-                    KsuSegSwitch(
+                    SegSwitch(
                         index = 2, count = 4,
                         icon = Icons.Rounded.Translate,
                         title = "显示翻译",
@@ -6058,7 +5777,7 @@ private fun FloatingLyricsSettingsSheet(
                             FloatingLyricsPrefs.setShowTranslation(ctx, it)
                         }
                     )
-                    KsuSegSwitch(
+                    SegSwitch(
                         index = 3, count = 4,
                         icon = Icons.Rounded.Lock,
                         title = "锁定歌词",
@@ -6071,7 +5790,7 @@ private fun FloatingLyricsSettingsSheet(
                     )
                 }
 
-                KsuSegTitle("文字颜色")
+                SegTitle("文字颜色")
                 var lyricColorIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricColorIndex(ctx)) }
                 run {                 Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("粉色" to 0, "蓝色" to 1).forEach { (nm, idx) ->
@@ -6098,7 +5817,7 @@ private fun FloatingLyricsSettingsSheet(
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
 
-                KsuSegTitle("自定义文字颜色")
+                SegTitle("自定义文字颜色")
                 Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(
                         0xFFFFFFFF.toInt() to "白", 0xFF000000.toInt() to "黑",
@@ -6120,7 +5839,7 @@ private fun FloatingLyricsSettingsSheet(
                     }
                 }
 
-                KsuSegTitle("背景颜色")
+                SegTitle("背景颜色")
                 var lyricBgIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricBgIndex(ctx)) }
                 run {                 Row(modifier = Modifier.padding(horizontal = 16.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("深色" to 0, "白色" to 1, "雫蓝" to 2, "芙兰" to 3, "绒灰蓝" to 4, "薰衣草紫" to 5, "透明" to 6).forEach { (nm, idx) ->
@@ -6141,7 +5860,7 @@ private fun FloatingLyricsSettingsSheet(
                     }
                 } }
 
-                KsuSegTitle("自定义背景颜色")
+                SegTitle("自定义背景颜色")
                 Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(
                         0xFFFFFFFF.toInt(), 0xFF000000.toInt(), 0xFF424242.toInt(), 0xFF1A237E.toInt(),
@@ -6160,8 +5879,8 @@ private fun FloatingLyricsSettingsSheet(
                     }
                 }
 
-                KsuSegColumn(title = "卡片外观") {
-                    KsuSegSwitch(
+                SegColumn(title = "卡片外观") {
+                    SegSwitch(
                         index = 0, count = 2,
                         icon = Icons.Rounded.WaterDrop,
                         title = "背景不透明",
@@ -6172,7 +5891,7 @@ private fun FloatingLyricsSettingsSheet(
                             FloatingLyricsPrefs.setOpaque(ctx, it)
                         }
                     )
-                    KsuSegRow(
+                    SegRow(
                         index = 1, count = 2,
                         icon = Icons.Rounded.FormatSize,
                         title = "字号",
@@ -6299,7 +6018,7 @@ private fun FloatingLyricsSettingsSheet(
                     )
                 }
 
-                KsuSegTitle("文字颜色")
+                SegTitle("文字颜色")
                 var lyricColorIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricColorIndex(ctx)) }
                 run {                 Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("粉色" to 0, "蓝色" to 1).forEach { (nm, idx) ->
@@ -6326,7 +6045,7 @@ private fun FloatingLyricsSettingsSheet(
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
 
-                KsuSegTitle("自定义文字颜色")
+                SegTitle("自定义文字颜色")
                 Row(modifier = Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(
                         0xFFFFFFFF.toInt() to "白", 0xFF000000.toInt() to "黑",
@@ -6348,7 +6067,7 @@ private fun FloatingLyricsSettingsSheet(
                     }
                 }
 
-                KsuSegTitle("背景颜色")
+                SegTitle("背景颜色")
                 var lyricBgIndexState by remember { mutableIntStateOf(FloatingLyricsPrefs.lyricBgIndex(ctx)) }
                 run {                 Row(modifier = Modifier.padding(horizontal = 16.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("深色" to 0, "白色" to 1, "雫蓝" to 2, "芙兰" to 3, "绒灰蓝" to 4, "薰衣草紫" to 5, "透明" to 6).forEach { (nm, idx) ->
@@ -6601,27 +6320,23 @@ private fun SettingsGlassCard(
             }
             .then(
                 if (LocalMd3Style.current || solid)
-                    Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedRectangle(24f.dp))
-                else Modifier.drawBackdrop(
-                    backdrop = backdrop,
-                    shape = { RoundedRectangle(24f.dp) },
-                    effects = {
-                        vibrancy()
-                        blur(8f.dp.toPx())
-                        lens(16f.dp.toPx(), 32f.dp.toPx())
-                    },
-                    highlight = {
-                        Highlight.Default.copy(alpha = 0.5f)
-                    }
-                )
+                    Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedRectangle(16f.dp))
+                // 新液态（对齐排序芯片）：半透明白 .14 面 + 白 .26 细描边，去 kyant 老液态管线
+                else Modifier.run {
+                    val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
+                    drawBackdrop(backdrop, shape = { RoundedRectangle(16f.dp) },
+                        effects = { blur(14f.dp.toPx()) },
+                        onDrawSurface = { drawRect(frost) })
+                }
+                    
             )
-            .clip(RoundedRectangle(24f.dp))
+            .clip(RoundedRectangle(16f.dp))
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick
             )
-            .padding(18.dp)
+            .padding(12.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -6632,7 +6347,7 @@ private fun SettingsGlassCard(
 }
 
 @Composable
-private fun LiquidGlassSwitch(
+internal fun LiquidGlassSwitch(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     backdrop: Backdrop
@@ -6666,14 +6381,16 @@ private fun LiquidGlassSwitch(
                 shape = { Capsule() },
                 effects = {
                     vibrancy()
-                    blur(6f.dp.toPx())
+                    blur(10f.dp.toPx())
                     lens(10f.dp.toPx(), 16f.dp.toPx())
                 },
-                highlight = { Highlight.Default.copy(alpha = 0.5f) },
-                shadow = { Shadow(alpha = 0.12f) },
+                highlight = { Highlight.Plain },
+                shadow = { null },
                 onDrawSurface = {
                     if (checked) {
                         drawRect(trackColor.copy(alpha = 0.85f))
+                    } else {
+                        drawRect(Color.White.copy(alpha = 0.30f))
                     }
                 }
             )
@@ -6695,7 +6412,7 @@ private fun LiquidGlassSwitch(
                         blur(3f.dp.toPx())
                         lens(6f.dp.toPx(), 10f.dp.toPx())
                     },
-                    highlight = { Highlight.Default.copy(alpha = 0.8f) },
+                    highlight = { Highlight.Plain },
                     onDrawSurface = {
                         drawRect(Color.White.copy(alpha = 0.85f))
                     }
@@ -7677,18 +7394,14 @@ fun CollapsibleCard(
                         .then(
                 if (LocalMd3Style.current)
                     Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedRectangle(24f.dp))
-                else Modifier.drawBackdrop(
-                    backdrop = backdrop,
-                    shape = { RoundedRectangle(24f.dp) },
-                    effects = {
-                        vibrancy()
-                        blur(8f.dp.toPx())
-                        lens(16f.dp.toPx(), 32f.dp.toPx())
-                    },
-                    highlight = {
-                        Highlight.Default.copy(alpha = 0.5f)
-                    }
-                )
+                // 新液态（对齐排序芯片）：半透明白 .14 面 + 白 .26 细描边，去 kyant 老液态管线
+                else Modifier.run {
+                    val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
+                    drawBackdrop(backdrop, shape = { RoundedRectangle(24f.dp) },
+                        effects = { blur(16f.dp.toPx()) },
+                        onDrawSurface = { drawRect(frost) })
+                }
+
             )
             .clip(RoundedRectangle(24f.dp))
     ) {
@@ -8032,7 +7745,7 @@ fun SongItem(
                         blur(6f.dp.toPx())
                         lens(12f.dp.toPx(), 24f.dp.toPx())
                     },
-                    glassHighlight = Highlight.Default.copy(alpha = 0.6f)
+                    glassHighlight = Highlight.Plain
                 )
                 .clip(RoundedRectangle(24f.dp))
                 .clickable(
@@ -8148,7 +7861,7 @@ fun SongItem(
             song = song,
             onDismiss = { showAddSheet = false },
             onAdded = { pl ->
-                val ps = PlaylistSong(id = song.id, name = song.name, artist = song.artist, picUrl = song.picUrl)
+                val ps = PlaylistSong(id = song.id, name = song.name, artist = song.artist, picUrl = song.picUrl, source = song.source)
                 PlaylistStore.savePlaylist(ctxA, pl.copy(songs = pl.songs + ps))
                 showAddSheet = false
                 AppToast.show("已加入歌单")
@@ -8233,7 +7946,10 @@ fun MD3StyleBottomSheetConsole(
     onExpandChange: (Boolean) -> Unit,
     onFullScreen: () -> Unit,
     isLandscape: Boolean,
-    backdrop: Backdrop
+    backdrop: Backdrop,
+    onSheetBounds: (androidx.compose.ui.geometry.Rect) -> Unit = {},
+    onCoverBounds: (androidx.compose.ui.geometry.Rect) -> Unit = {},
+    artworkVisible: () -> Boolean = { true }
 ) {
     val currentLyricText = remember(lyrics, currentLyricIndex) {
         if (currentLyricIndex >= 0 && currentLyricIndex < lyrics.times.size) {
@@ -8280,6 +7996,7 @@ fun MD3StyleBottomSheetConsole(
     val consoleShape = RoundedCornerShape(24.dp)
     Box(
         modifier = Modifier
+            .onGloballyPositioned { onSheetBounds(it.boundsInRoot()) }
             .fillMaxWidth()
             .padding(horizontal = if (isLandscape) 0.dp else 16.dp)
             .height(consoleHeight)
@@ -8313,14 +8030,18 @@ fun MD3StyleBottomSheetConsole(
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // 上游 MiniPlayer 同款：上滑手势直接展开全屏页（PlayerSheetDragController）
+                    .playerSheetDrag(fromMini = true, enabled = currentSong != null),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                        .onGloballyPositioned { onCoverBounds(it.boundsInRoot()) },
                     contentAlignment = Alignment.Center
                 ) {
                     val cover = currentSong?.picUrl ?: ""
@@ -8329,7 +8050,9 @@ fun MD3StyleBottomSheetConsole(
                             model = cover,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize().graphicsLayer {
+                                alpha = if (artworkVisible()) 1f else 0f
+                            }
                         )
                     } else {
                         // 无封面兜底：统一封面占位图铺满（原为 MusicNote 图标）
@@ -8337,7 +8060,9 @@ fun MD3StyleBottomSheetConsole(
                             painter = painterResource(R.drawable.fallback_cover),
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize().graphicsLayer {
+                                alpha = if (artworkVisible()) 1f else 0f
+                            }
                         )
                     }
                 }
@@ -8449,23 +8174,29 @@ fun MD3StyleBottomSheetConsole(
                             Icon(Icons.Rounded.SkipPrevious, null, tint = MaterialTheme.colorScheme.onSurface)
                         }
                         Spacer(modifier = Modifier.width(4.dp))
+                        // 控制台播放按钮：接入 nativeui ElasticPress 果冻引擎（按压膨起/拽动
+                        // 橡皮筋/弹簧回弹摆动 + 按压高光），布局与命中区域保持静止。
+                        val expandedPlayPress = com.HyperX.MI.Na.nativeui.rememberElasticPressState()
                         val expandedPlayInteractionSource = remember { MutableInteractionSource() }
-                        val expandedPlayIsPressed by expandedPlayInteractionSource.collectIsPressedAsState()
-                        val expandedPlayScale by animateFloatAsState(
-                            targetValue = if (expandedPlayIsPressed) 0.84f else 1f,
-                            animationSpec = spring(dampingRatio = 0.35f, stiffness = 550f),
-                            label = "ExpandedPlayPress"
-                        )
-                        Box(
+                        com.HyperX.MI.Na.nativeui.ElasticPress(
                             modifier = Modifier
                                 .size(46.dp)
-                                .graphicsLayer { scaleX = expandedPlayScale; scaleY = expandedPlayScale }
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(MaterialTheme.colorScheme.primary)
                                 .clickable(interactionSource = expandedPlayInteractionSource, indication = null) { onPlayPause() },
-                            contentAlignment = Alignment.Center
+                            state = expandedPlayPress,
                         ) {
-                            Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(26.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(MaterialTheme.colorScheme.primary)
+                                    .drawBehind {
+                                        drawRect(Color.White.copy(
+                                            alpha = .06f * expandedPlayPress.amount.coerceIn(0f, 1f)))
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(26.dp))
+                            }
                         }
                         Spacer(modifier = Modifier.width(4.dp))
                         IconButton(onClick = onNext, modifier = Modifier.size(36.dp)) {
@@ -8484,25 +8215,27 @@ fun MD3StyleBottomSheetConsole(
                             .padding(start = 14.dp, end = 2.dp)
                     ) {
                         Box(modifier = Modifier.fillMaxWidth().height(24.dp), contentAlignment = Alignment.Center) {
-                        if (ProgressStylePrefs.waveEnabled(androidx.compose.ui.platform.LocalContext.current)) {
-                            TadpoleWaveSlider(
-                                                        value = currentPosition.toFloat(),
-                                                        onValueChange = { viewModel.seekTo(it.toLong()) },
-                                                        valueRange = 0f..maxProgressValue,
-                                                        modifier = Modifier.fillMaxWidth().height(28.dp),
-                                                        activeColor = MaterialTheme.colorScheme.primary,
-                                                        inactiveColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-                                                        thumbColor = MaterialTheme.colorScheme.primary
-                                                    )
-                        } else {
-                            Slider(
-                                                        value = currentPosition.toFloat(),
-                                                        onValueChange = { viewModel.seekTo(it.toLong()) },
-                                                        valueRange = 0f..maxProgressValue,
-                                                        modifier = Modifier.fillMaxWidth().height(28.dp),
-                                                        colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary, inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
-                                                    )
-                        }
+                            // 主屏回归波浪条：TadpoleWaveSlider（用户指定的官方 M3 波浪组件），
+                            // GlowSeekBar 只保留在用户明确要辉光的位置（唱片架底部）。
+                            if (ProgressStylePrefs.waveEnabled(androidx.compose.ui.platform.LocalContext.current)) {
+                                TadpoleWaveSlider(
+                                    value = currentPosition.toFloat(),
+                                    onValueChange = { viewModel.seekTo(it.toLong()) },
+                                    valueRange = 0f..maxProgressValue,
+                                    modifier = Modifier.fillMaxWidth().height(28.dp),
+                                    activeColor = MaterialTheme.colorScheme.primary,
+                                    inactiveColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                    thumbColor = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                Slider(
+                                    value = currentPosition.toFloat(),
+                                    onValueChange = { viewModel.seekTo(it.toLong()) },
+                                    valueRange = 0f..maxProgressValue,
+                                    modifier = Modifier.fillMaxWidth().height(28.dp),
+                                    colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary, inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                )
+                            }
                         }
                         Spacer(modifier = Modifier.height(2.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -8736,7 +8469,8 @@ fun formatDuration(millis: Long): String {
 fun HistoryScreen(
     viewModel: PlayerViewModel,
     backdrop: Backdrop,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenFootprint: (() -> Unit)? = null
 ) {
     var searchText by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
@@ -8798,6 +8532,58 @@ fun HistoryScreen(
                 )
 
                 // 搜索框独立于列表存在性：清空历史时平滑收起，不再"瞬间消失"
+                // 听歌足迹入口胶囊：不依赖歌单页，历史页顶部随时可进
+                if (onOpenFootprint != null) {
+                    Surface(
+                        onClick = onOpenFootprint,
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Schedule,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "听歌足迹",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Text(
+                                    "今日收听时长与时段分布",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                                )
+                            }
+                            Icon(
+                                Icons.Rounded.ChevronRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+
                 AnimatedVisibility(
                     visible = historyList.isNotEmpty(),
                     enter = fadeIn(Motion.enter()) +
@@ -8873,18 +8659,21 @@ fun HistoryScreen(
                             items = filteredHistory,
                             key = { index, s -> "history_${s.id}_$index" }
                         ) { index, song ->
-                            SongItem(
-                                song = song,
-                                isCurrentSong = song.id == currentSong?.id,
-                                isPlaying = isPlaying,
-                                isFirst = index == 0,
-                                isLast = index == filteredHistory.size - 1,
-                                onClick = { viewModel.playSong(song, filteredHistory) },
-                                viewModel = viewModel,
-                                backdrop = backdrop,
-                                isInFavorites = false,
-                                onRemoveFromFavorites = null
-                            )
+                            // 列表项错峰入场（alpha+上浮 240ms，按 index 32ms 错峰）
+                            Box(modifier = Modifier.fillMaxWidth().listItemEnter(index)) {
+                                SongItem(
+                                    song = song,
+                                    isCurrentSong = song.id == currentSong?.id,
+                                    isPlaying = isPlaying,
+                                    isFirst = index == 0,
+                                    isLast = index == filteredHistory.size - 1,
+                                    onClick = { viewModel.playSong(song, filteredHistory) },
+                                    viewModel = viewModel,
+                                    backdrop = backdrop,
+                                    isInFavorites = false,
+                                    onRemoveFromFavorites = null
+                                )
+                            }
                         }
                     }
                 }
@@ -8989,7 +8778,6 @@ fun GenericSearchBar(
     }
 }
 
-val LocalMd3Style = androidx.compose.runtime.staticCompositionLocalOf { false }
 val LocalMd3Translucent = androidx.compose.runtime.staticCompositionLocalOf { false }
 val LocalMd3Backdrop = androidx.compose.runtime.staticCompositionLocalOf<com.kyant.backdrop.Backdrop?> { null }
 
@@ -9030,6 +8818,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (FloatingLyricsPrefs.isEnabled(this)) FloatingLyricsService.start(this)
+        // MD3 导航栏沉浸小白条：前提是窗口 edge-to-edge —— 窗口不开边到边时系统
+        // reserved 底部区应用画不进去，任何 Spacer/色块都无效。enableEdgeToEdge()
+        // 在 API<35 上置透明 status/navigationBar 色，API 35+ 由系统强制边到边。
+        enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         try {
@@ -9037,8 +8829,6 @@ class MainActivity : ComponentActivity() {
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
             )
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
         } catch (_: Exception) { }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -9114,7 +8904,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    MaterialTheme(colorScheme = customAnimatedColorScheme, typography = KsuTypography) {
+    MaterialTheme(colorScheme = customAnimatedColorScheme, typography = NaTypography) {
         var showSplash by remember { mutableStateOf(true) }
 
                 val appPrefs = remember { context.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE) }
@@ -9477,36 +9267,50 @@ class MainActivity : ComponentActivity() {
                                 Button(onClick = {
                                     isDownloading = true
                                     scope.launch(Dispatchers.IO) {
-                                        // 镜像加速链：依次尝试每个候选 URL，完整下载且校验通过才算成功，失败自动切下一个
+                                        // 下载链：服务器直连优先（恒可用），GitHub 镜像随后加速；支持断点续传，每候选最多重试 3 次
                                         val ver = update.version.trim().removePrefix("v").removePrefix("V")
                                         val ghAsset = "https://github.com/Mintllo/MINova/releases/download/v$ver/MINova_${ver}_release.apk"
                                         val candidates = listOf(
+                                            update.updateUrl,
                                             "https://ghfast.top/$ghAsset",
                                             "https://gh-proxy.com/$ghAsset",
-                                            "https://github.moeyy.xyz/$ghAsset",
-                                            update.updateUrl
+                                            "https://github.moeyy.xyz/$ghAsset"
                                         )
                                         val apkFile = File(cacheDir, "update.apk")
                                         val partFile = File(cacheDir, "update.part")
-                                        // 单个候选：下载到临时文件，完成后校验（服务器直连按 Content-Length 对比大小，镜像校验 ZIP 中央目录完整性）
+                                        // 单个候选（支持断点续传）：带 Range 请求，206 追加 / 200 重头；完成校验（直连按大小，镜像校验 ZIP）
                                         suspend fun tryCandidate(urlStr: String, isServerDirect: Boolean): Boolean {
+                                            val base = if (partFile.exists()) partFile.length() else 0L
                                             val connection = URL(urlStr).openConnection() as HttpURLConnection
                                             connection.connectTimeout = 15000
                                             connection.readTimeout = 30000
-                                            var fileLength = -1
+                                            connection.instanceFollowRedirects = true
+                                            if (base > 0) connection.setRequestProperty("Range", "bytes=$base-")
+                                            var total = -1L
+                                            var resumed = false
                                             try {
-                                                connection.connect()
-                                                fileLength = connection.contentLength
+                                                val code = connection.responseCode
+                                                if (base > 0 && code == 206) {
+                                                    resumed = true
+                                                    total = connection.getHeaderField("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1L
+                                                } else if (code in 200..299) {
+                                                    if (base > 0) partFile.delete()
+                                                    total = connection.contentLength.takeIf { it > 0 }?.toLong() ?: -1L
+                                                } else {
+                                                    connection.disconnect()
+                                                    return false
+                                                }
                                                 connection.inputStream.use { input ->
-                                                    partFile.outputStream().use { output ->
+                                                    java.io.FileOutputStream(partFile, resumed).use { output ->
                                                         val buffer = ByteArray(65536)
-                                                        var totalRead = 0L
+                                                        var done = 0L
                                                         var read: Int
                                                         while (input.read(buffer).also { read = it } != -1) {
-                                                            totalRead += read
+                                                            done += read
                                                             output.write(buffer, 0, read)
+                                                            val now = ((if (resumed) base else 0L) + done).toFloat()
                                                             withContext(Dispatchers.Main) {
-                                                                downloadProgress = if (fileLength > 0) (totalRead.toFloat() / fileLength).coerceIn(0f, 1f) else 0f
+                                                                downloadProgress = if (total > 0) (now / total).coerceIn(0f, 1f) else 0f
                                                             }
                                                         }
                                                         output.flush()
@@ -9515,7 +9319,8 @@ class MainActivity : ComponentActivity() {
                                             } finally {
                                                 connection.disconnect()
                                             }
-                                            val sizeOk = partFile.length() > 0 && (fileLength <= 0 || partFile.length() == fileLength.toLong())
+                                            val sizeNow = partFile.length()
+                                            val sizeOk = sizeNow > 0 && (total <= 0 || sizeNow == total)
                                             var zipOk = false
                                             if (!isServerDirect && sizeOk) {
                                                 zipOk = try {
@@ -9531,14 +9336,17 @@ class MainActivity : ComponentActivity() {
                                                 if (apkFile.exists()) apkFile.delete()
                                                 if (partFile.renameTo(apkFile)) return true
                                             }
-                                            partFile.delete()
+                                            if (!sizeOk) partFile.delete()
                                             return false
                                         }
                                         var installed = false
-                                        for (candidate in candidates) {
-                                            try {
-                                                if (tryCandidate(candidate, candidate == update.updateUrl)) { installed = true; break }
-                                            } catch (_: Exception) { }
+                                        outer@ for (candidate in candidates) {
+                                            for (attempt in 1..3) {
+                                                try {
+                                                    if (tryCandidate(candidate, candidate == update.updateUrl)) { installed = true; break@outer }
+                                                } catch (_: Exception) { }
+                                                kotlinx.coroutines.delay(1500L * attempt)
+                                            }
                                         }
                                         if (installed) {
                                             withContext(Dispatchers.Main) {
@@ -9598,6 +9406,7 @@ private fun MaintenanceBlockScreen(
     onDismiss: () -> Unit = {},
 ) {
     BackHandler(enabled = dismissible) { onDismiss() }
+    FoldEnterHost(visible = true) {
     Dialog(
         onDismissRequest = { if (dismissible) onDismiss() },
         properties = DialogProperties(
@@ -9657,6 +9466,7 @@ private fun MaintenanceBlockScreen(
             }
         }
     }
+    }
 }
 
 /** 重要维护（level 2）：居中弹窗，有关闭按钮，但警告色明显。 */
@@ -9665,6 +9475,7 @@ private fun MaintenanceNoticeDialog(
     info: PlayerViewModel.MaintenanceInfo,
     onDismiss: () -> Unit
 ) {
+    FoldEnterHost(visible = true) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -9702,6 +9513,7 @@ private fun MaintenanceNoticeDialog(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("我知道了") } }
     )
+    }
 }
 
 /** 普通维护（level 1）：顶部细横幅，只占一条，不遮挡也不拦截其它操作。 */
@@ -9779,6 +9591,24 @@ data class ChangelogEntry(val version: String, val items: List<String>)
 
 /** 各版本改动要点（只写项目里真实存在 / 真实修过的内容）。 */
 private val CHANGELOG: List<ChangelogEntry> = listOf(
+    ChangelogEntry(
+        version = "1.3.5",
+        items = listOf(
+            "动画全重做，体验更加丝滑",
+            "全新 3D 唱片架歌单：堆叠/简洁两种浏览模式，支持抽出唱片 360 度细细观摩",
+            "全站液态玻璃材质统一：卡片真磨砂更通透，边缘高光 100% 清除，按压/拖动高光反馈回归",
+            "设置页焕新：分组卡片液态化，开关换上悬浮歌词同款可拖拽玻璃旋钮",
+            "搜索按钮恢复大按钮并支持拽动果冻手感；搜索排序按钮改为半透明固定样式",
+            "歌单删除更彻底：本地与云端同步删除，清数据重登后不再复活",
+            "音质切换升级为独立页面，选择更直观",
+            "推荐更懂你：听过的歌会悄悄影响后续推荐，每日 30 首依旧稳定",
+            "歌曲解析更稳：VIP 歌、DJ 版、各平台歌曲大幅提升可播率",
+            "全新歌词页：滚动更顺滑，无歌词不再转圈",
+            "封面取色与背景模糊改用 C++ 加速，播放页更流畅省电",
+            "界面细节全面打磨：导航栏、进度条、弹窗样式统一，应用图标微调放大"
+        )
+    ),
+
         ChangelogEntry(
         version = "1.3.4",
                 items = listOf(

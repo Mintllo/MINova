@@ -199,7 +199,7 @@ fun FloatingBottomBar(
 ) {
     val isInDark = isSystemInDarkTheme()
     val pillShape = remember { CircleShape }
-    val accentColor = MiuixTheme.colorScheme.primary
+    val accentColor = MaterialTheme.colorScheme.primary
                                     val tabContentColor = MiuixTheme.colorScheme.onSurface
     val surfaceContainer = MiuixTheme.colorScheme.surfaceContainer
         val containerAlpha = when (transparencyLevel) {
@@ -208,6 +208,8 @@ fun FloatingBottomBar(
         else -> 0.4f
     }
     val containerColor = if (isBlurEnabled) surfaceContainer.copy(containerAlpha) else surfaceContainer
+    // 折叠转场（子页进/出场）播放期间 backdrop 采样不可靠：切静态玻璃色兜底，不采样即不会发黑
+    val glassActive = isBlurEnabled && FoldTransitionBus.activeCount == 0
 
     val tabsBackdrop = rememberLayerBackdrop()
     val density = LocalDensity.current
@@ -343,7 +345,7 @@ fun FloatingBottomBar(
                     ),
                 )
                 .then(
-                    if (isBlurEnabled) {
+                    if (glassActive) {
                         Modifier.drawBackdrop(
                             backdrop = backdrop,
                             shape = { pillShape },
@@ -354,14 +356,19 @@ fun FloatingBottomBar(
                                 lens(
                                     refractionHeight = 24.dp.toPx(),
                                     refractionAmount = 24.dp.toPx(),
+                                    depthEffect = true,
+                                    chromaticAberration = 0.5f,
                                 )
                             },
                             highlight = { baseHighlight.value.copy(alpha = 0.75f) },
                             layerBlock = {
+                                // 按压微凹（液面受压）：横向微胀 + 纵向微收 + 轻微下沉，
+                                // pressProgress 自带 spring，松手回弹带过冲
+                                val press = dampedDragAnimation.pressProgress
                                 val width = size.width.coerceAtLeast(1f)
-                                val s = lerp(1f, 1f + 16.dp.toPx() / width, dampedDragAnimation.pressProgress)
-                                scaleX = s
-                                scaleY = s
+                                scaleX = 1f + (6.dp.toPx() / width) * press
+                                scaleY = 1f - 0.018f * press
+                                translationY = 1.dp.toPx() * press
                             },
                             onDrawSurface = { drawRect(containerColor) },
                         )
@@ -370,7 +377,20 @@ fun FloatingBottomBar(
                     }
                 )
                 .then(
-                    if (isBlurEnabled) {
+                    if (glassActive) {
+                        Modifier.innerShadow(shape = pillShape) {
+                            // 凹陷阴影随 pressProgress 弹簧进出：按下玻璃微凹，松手回弹
+                            val press = dampedDragAnimation.pressProgress
+                            if (press > 0.01f) InnerShadow(
+                                radius = 10.dp * press,
+                                color = Color.Black.copy(alpha = 0.12f),
+                                alpha = press,
+                            ) else null
+                        }
+                    } else Modifier
+                )
+                .then(
+                    if (glassActive) {
                         interactiveHighlight.modifier.then(interactiveHighlight.gestureModifier)
                     } else Modifier
                 )
@@ -384,7 +404,7 @@ fun FloatingBottomBar(
             }
         }
 
-        if (isBlurEnabled) {
+        if (glassActive) {
             CompositionLocalProvider(
                 LocalFloatingBottomBarTabScale provides {
                     lerp(1f, 1.2f, dampedDragAnimation.pressProgress)
@@ -406,6 +426,8 @@ fun FloatingBottomBar(
                                 lens(
                                     refractionHeight = 24.dp.toPx(),
                                     refractionAmount = 24.dp.toPx(),
+                                    depthEffect = true,
+                                    chromaticAberration = 0.5f,
                                 )
                             },
                             onDrawSurface = { drawRect(containerColor) },
@@ -421,7 +443,7 @@ fun FloatingBottomBar(
 
         if (tabWidthPx > 0f) {
             val tabWidthDp = with(density) { tabWidthPx.toDp() }
-            if (isBlurEnabled) {
+            if (glassActive) {
                 Box(
                     Modifier
                         .padding(horizontal = 4.dp)

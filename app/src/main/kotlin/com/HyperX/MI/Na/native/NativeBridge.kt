@@ -121,7 +121,51 @@ object NativeBridge {
      */
     external fun nativeParseLrcFull(lrc: String): Array<Any>
 
+    /**
+     * 封面调色板提取（CmxPlayerUi.paletteFromPixels 的 C++ 版）：
+     * 返回 `IntArray[2]{ 主色 ARGB, 辅色 ARGB }`；无有效像素返回中性灰，
+     * 与 Kotlin Neutral 一致。
+     */
+    external fun nativeArtworkPalette(pixels: IntArray): IntArray?
+
+    /**
+     * 可分离盒式模糊 2 轮（PlayerBackdrop.blurBackgroundPixels 的 C++ 版）：
+     * 返回模糊后的新像素数组；pixels.length ≠ width*height 或参数非法时返回 null。
+     */
+    external fun nativeBlurPixels(pixels: IntArray, width: Int, height: Int, radius: Int): IntArray?
+
+    private val onceArtPalette = Once("artworkPalette")
+    private val onceBlur = Once("blurPixels")
+
     // ── 安全包装（调用点使用这些）───────────────────────────────────────────
+
+    /**
+     * 封面调色板：返回 (主色 ARGB, 辅色 ARGB)；native 不可用或失败返回 null，
+     * 调用点据此走原 Kotlin 分桶循环（视觉与原实现一致）。
+     */
+    fun artworkPalette(pixels: IntArray): Pair<Int, Int>? {
+        if (!loaded || pixels.isEmpty()) return null
+        return try {
+            onceArtPalette.fire()
+            nativeArtworkPalette(pixels)?.let { if (it.size >= 2) it[0] to it[1] else null }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * 盒式模糊。返回模糊后的新像素数组；native 不可用或失败返回 null，
+     * 调用点据此走原 Kotlin 循环（观感与原实现一致）。
+     */
+    fun blurPixels(pixels: IntArray, width: Int, height: Int, radius: Int): IntArray? {
+        if (!loaded || pixels.isEmpty() || width <= 0 || height <= 0 || radius < 1) return null
+        return try {
+            onceBlur.fire()
+            nativeBlurPixels(pixels, width, height, radius)
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     /**
      * 波浪 y 值预计算。返回写入 out 的点数；native 不可用或失败返回 -1，

@@ -506,6 +506,7 @@ private fun AuthFormContainer(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isMd3 = LocalMd3Style.current
+    val glassFrost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.22f)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -515,9 +516,15 @@ private fun AuthFormContainer(
                         MaterialTheme.colorScheme.surfaceContainerHigh,
                         RoundedRectangle(28f.dp)
                     )
-                else Modifier
+                else Modifier.drawBackdrop(
+                    backdrop = backdrop,
+                    shape = { RoundedRectangle(28f.dp) },
+                    effects = { blur(10f.dp.toPx()) },
+                    highlight = { com.kyant.backdrop.highlight.Highlight.Plain.copy(alpha = 0f) },
+                    onDrawSurface = { drawRect(glassFrost) }
+                )
             )
-            .padding(if (isMd3) 20.dp else 0.dp),
+            .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(if (isMd3) 18.dp else 14.dp),
         content = content
     )

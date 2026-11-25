@@ -1,5 +1,4 @@
 // Adapted from Kyant0/AndroidLiquidGlass — https://github.com/Kyant0/AndroidLiquidGlass (Apache 2.0).
-// Mirrored from compose-miuix-ui example.
 
 package com.HyperX.MI.Na.liquid
 
