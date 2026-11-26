@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MINova · 11月25 更新预览</title>
+<title>MINova · 更新日志</title>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="apple-touch-icon" href="icon.png">
 <link rel="stylesheet" href="web/misans/MiSansVF.min.css">
@@ -57,7 +57,257 @@
     12%{opacity:1}
     72%{opacity:1}
     100%{transform:translate3d(190vw,0,0) rotate(-14deg);opacity:0}
+  }
+
+
+  /* ================= 版式 ================= */
+  .page{position:relative;z-index:1}
+  .screen{
+    position:relative;min-height:100vh;min-height:100svh;
+    padding:6.5vh 6vw 7vh;
+    display:flex;flex-direction:column;justify-content:center;
+    scroll-snap-align:start;
+  }
+  .rule{position:absolute;left:6vw;right:6vw;top:0;height:1px;background:var(--line)}
+  .brand{font-size:14px;letter-spacing:.34em;color:var(--faint);font-weight:600}
+
+  /* ---------- 封面 ---------- */
+  .s-cover{justify-content:space-between}
+  .s-cover .top{display:flex;justify-content:space-between;align-items:baseline}
+  .s-cover .top em{font-style:normal;font-size:13px;letter-spacing:.2em;color:var(--faint)}
+  .s-cover h1{
+    font-size:clamp(62px,10.4vw,168px);line-height:1.04;font-weight:440;
+    letter-spacing:-.035em;
+  }
+  .s-cover h1 span{display:block}
+  .s-cover h1 .accent{
+    background:linear-gradient(96deg,#FF6B8A 0%,#9169FF 46%,#4189FF 92%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    padding-right:.1em;
+  }
+  .s-cover .foot{display:flex;justify-content:space-between;align-items:flex-end;gap:40px}
+  .s-cover .note{
+    font-size:15px;line-height:1.95;color:var(--soft);text-align:right;max-width:300px;
+  }
+  .s-cover .note b{font-weight:500;color:rgba(10,10,18,.78)}
+  .scroll{font-size:11px;letter-spacing:.3em;color:var(--faint);display:flex;align-items:center;gap:10px}
+  .scroll::after{content:'';display:block;width:44px;height:1px;background:var(--line)}
+
+  /* ---------- 影片 ---------- */
+  .s-film{padding:0;justify-content:center;align-items:center;overflow:hidden}
+  .s-film video{width:100vw;height:100vh;height:100svh;object-fit:contain;display:block;background:transparent}
+
+  /* ---------- 功能屏 ---------- */
+  .s-feat{
+    display:grid;grid-template-columns:1fr 1fr;align-items:center;
+    height:100vh;height:100svh;padding:0;overflow:hidden;
+  }
+  .s-feat .copy{padding:0 5vw 0 6vw;max-width:640px}
+  .s-feat.flip .copy{order:2;padding:0 6vw 0 5vw}
+  .s-feat .idx{
+    display:block;font-size:12px;letter-spacing:.34em;color:var(--faint);
+    font-variant-numeric:tabular-nums;margin-bottom:5vh;
+  }
+  .s-feat h2{
+    font-size:clamp(34px,4.6vw,72px);line-height:1.06;font-weight:440;
+    letter-spacing:-.028em;margin-bottom:3.4vh;
+  }
+  .s-feat p{font-size:16px;line-height:2;color:var(--soft);max-width:26em}
+  .s-feat .shot{position:relative;height:100%;overflow:hidden}
+  .s-feat.flip .shot{order:1}
+  .s-feat .shot img{
+    position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    object-position:0% 50%;
+    -webkit-mask-image:radial-gradient(ellipse 82% 72% at 44% 50%,#000 48%,rgba(0,0,0,0) 88%);
+    mask-image:radial-gradient(ellipse 82% 72% at 44% 50%,#000 48%,rgba(0,0,0,0) 88%);
+    transform:scale(1.02);
+  }
+
+  /* ---------- 结尾 ---------- */
+  .s-end{justify-content:center;text-align:left}
+  .s-end h2{
+    font-size:clamp(46px,7.6vw,124px);line-height:1;font-weight:440;letter-spacing:-.035em;
+  }
+  .s-end h2 .dim{color:var(--faint)}
+  .s-end .row{margin-top:7vh;display:flex;justify-content:space-between;align-items:flex-end;gap:40px;flex-wrap:wrap}
+  .s-end p{font-size:15px;line-height:1.9;color:var(--soft)}
+  .s-end a{
+    font-size:clamp(18px,2.2vw,30px);color:var(--ink);text-decoration:none;
+    letter-spacing:-.01em;border-bottom:1px solid rgba(10,10,18,.28);
+    padding-bottom:6px;transition:border-color .3s,color .3s;
+  }
+  .s-end a:hover{color:#7A5CFF;border-color:#7A5CFF}
+  .foot-mark{
+    position:absolute;left:6vw;right:6vw;bottom:4vh;
+    display:flex;justify-content:space-between;
+    font-size:11px;letter-spacing:.2em;color:var(--faint);
+  }
+
+  /* ---------- 入场 ---------- */
+  .up{opacity:0;transform:translateY(34px);
+    transition:opacity 1.05s cubic-bezier(.16,.84,.28,1),transform 1.05s cubic-bezier(.16,.84,.28,1)}
+  .up.in{opacity:1;transform:none}
+
+  @media (max-width:860px){
+    .screen{padding:8vh 7vw}
+    .s-cover{justify-content:center;gap:8vh}
+    .s-cover .foot{flex-direction:column;align-items:flex-start;gap:22px}
+    .s-cover .note{text-align:left;max-width:100%}
+    .s-feat{grid-template-columns:1fr;padding:8vh 0 10vh;gap:4vh}
+    .s-feat .copy,.s-feat.flip .copy{order:1;padding:0 7vw;max-width:none}
+    .s-feat .shot,.s-feat.flip .shot{order:2;height:56vh;width:100%;margin:0}
+    .s-feat .shot img{object-position:50% 52%;
+      -webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0%,#000 15%,#000 85%,rgba(0,0,0,0) 100%);
+      mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0%,#000 15%,#000 85%,rgba(0,0,0,0) 100%)}
+    .s-feat .idx{margin-bottom:3vh}
+    .s-end .row{flex-direction:column;align-items:flex-start;gap:24px}
+    .s-film video{height:62vh}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .sky i,.sky .band{animation:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="sky">
+  <i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i>
+  <div class="band"></div>
+  <div class="p p1"></div><div class="p p2"></div>  <div class="p p4"></div></div>
+
+<main class="page">
+
+  <!-- 封面 -->
+  <section class="screen s-cover">
+    <div class="top">
+      <div class="brand">MINova</div>
+      <em>2026 / 11 / 25</em>
+    </div>
+
+    <h1 class="up">
+      <span>更新</span>
+      <span class="accent">日志</span>
+    </h1>
+
+    <div class="hero-btns up" style="margin-top:5vh;display:flex;gap:16px;flex-wrap:wrap">
+      <a href="https://github.com/Mintllo/MINova/releases/latest" target="_blank" rel="noopener" style="
+        display:inline-flex;align-items:center;gap:10px;
+        padding:16px 36px;border-radius:999px;
+        background:rgba(10,10,18,.92);color:#FAF9FD;
+        font-size:16px;font-weight:600;text-decoration:none;border-bottom:none;
+        box-shadow:0 6px 24px rgba(10,10,18,.16);transition:transform .15s,box-shadow .15s"
+        onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 10px 32px rgba(10,10,18,.22)'"
+        onmouseout="this.style.transform='';this.style.boxShadow='0 6px 24px rgba(10,10,18,.16)'">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        下载最新版
+      </a>
+      <a href="https://afdian.com/a/MINova" target="_blank" rel="noopener" style="
+        display:inline-flex;align-items:center;gap:10px;
+        padding:16px 36px;border-radius:999px;
+        border:1px solid rgba(10,10,18,.22);color:var(--ink);
+        font-size:16px;font-weight:600;text-decoration:none;border-bottom:1px solid rgba(10,10,18,.22);
+        transition:transform .15s,background-color .15s"
+        onmouseover="this.style.transform='translateY(-2px)';this.style.backgroundColor='rgba(10,10,18,.06)'"
+        onmouseout="this.style.transform='';this.style.backgroundColor=''">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        支持我们 · 爱发电
+      </a>
+    </div>
+    <div class="foot">
+      <div class="scroll up">SCROLL</div>
+      <p class="note up">本次有重大更新，<b>bug 较多</b>。<br>后续会跟进修复。</p>
+    </div>
+  </section>
+
+  <!-- 影片 -->
+  <section class="screen s-film">
+    <video id="v" src="video/MINova_promo_2026-11-25.mp4"
+      autoplay muted loop playsinline preload="auto"></video>
+
+  </section>
+
+  <!-- 01 -->
+  <section class="screen s-feat">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">01</span>
+      <h2 class="up">全新<br>3D 歌单</h2>
+      <p class="up">动态取色，可单张抽出观摩。此页面来源项目 Current，在此基础上进行升级、更改、优化体验。</p>
+    </div>
+    <figure class="shot"><img src="stills/feat-3d.png" alt="全新 3D 歌单"></figure>
+  </section>
+
+  <!-- 02 -->
+  <section class="screen s-feat flip">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">02</span>
+      <h2 class="up">全屏音乐<br>播放页面</h2>
+      <p class="up">封面铺满整屏，歌词逐字高亮。</p>
+    </div>
+    <figure class="shot"><img src="stills/feat-player.png" alt="全新全屏音乐播放页面"></figure>
+  </section>
+
+  <!-- 03 -->
+  <section class="screen s-feat">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">03</span>
+      <h2 class="up">推荐与<br>每日 30 首</h2>
+      <p class="up">全新的推荐卡片，每天三十首，按心情挑。</p>
+    </div>
+    <figure class="shot"><img src="stills/feat-daily.png" alt="全新推荐与每日 30 首卡片"></figure>
+  </section>
+
+  <!-- 04 -->
+  <section class="screen s-feat flip">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">04</span>
+      <h2 class="up">听歌<br>足迹</h2>
+      <p class="up">今日时长、最爱歌手、时段分布，一页看完。</p>
+    </div>
+    <figure class="shot"><img src="stills/feat-footprint.png" alt="新增听歌足迹"></figure>
+  </section>
+
+  <!-- 结尾 -->
+  <section class="screen s-end">
+    <div class="rule"></div>
+    <h2 class="up">这只是一部分<br><span class="dim">已在 GitHub 开源</span></h2>
+    <div class="row">
+      <p class="up">Release 页可直接下载。<br>轻量、开源、云端同步。</p>
+
+    </div>
+    <div class="foot-mark"><span>MINOVA</span><span>2026.11</span></div>
+  </section>
+
+</main>
+
+<script>
+(() => {
+  const v = document.getElementById('v');
+
+  v.addEventListener('click', () => { v.paused ? v.play() : v.pause(); });
+  v.play().catch(() => {});
+
+  const io = new IntersectionObserver((es) => {
+    es.forEach((e) => {
+      if (!e.isIntersecting) return;
+      e.target.classList.add('in');
+      io.unobserve(e.target);
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -2% 0px' });
+  document.querySelectorAll('.up').forEach((n, i) => {
+    n.style.transitionDelay = (i % 4) * 90 + 'ms';
+    io.observe(n);
   });
+
+  const vio = new IntersectionObserver((es) => {
+    es.forEach((e) => {
+      if (e.isIntersecting) v.play().catch(() => {});
+      else v.pause();
+    });
+  }, { threshold: 0.25 });
   vio.observe(v);
 })();
 </script>
