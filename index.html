@@ -119,11 +119,6 @@
   /* ---------- 影片 ---------- */
   .s-film{padding:0;justify-content:center;align-items:center;overflow:hidden}
   .s-film video{width:100vw;height:100vh;height:100svh;object-fit:contain;display:block;background:transparent}
-  .film-meta{
-    position:absolute;left:6vw;right:6vw;bottom:5vh;
-    display:flex;justify-content:space-between;
-    font-size:11px;letter-spacing:.22em;color:var(--faint);pointer-events:none;
-  }
 
   /* ---------- 功能屏 ---------- */
   .s-feat{
@@ -190,7 +185,6 @@
     .s-feat .idx{margin-bottom:3vh}
     .s-end .row{flex-direction:column;align-items:flex-start;gap:24px}
     .s-film video{height:62vh}
-    .film-meta{bottom:auto;top:8vh}
   }
   @media (prefers-reduced-motion:reduce){
     .sky i,.sky .p,.sky .band{animation:none}
@@ -215,14 +209,35 @@
       <em>2026 / 11 / 25</em>
     </div>
 
-    <div class="app-icon up" style="margin-bottom:4vh">
-      <img src="icon.png" alt="MINova" style="width:96px;height:96px;border-radius:24px;box-shadow:0 8px 32px rgba(10,10,18,.14)">
-    </div>
     <h1 class="up">
       <span>11月25</span>
       <span class="accent">更新预览</span>
     </h1>
 
+    <div class="hero-btns up" style="margin-top:5vh;display:flex;gap:16px;flex-wrap:wrap">
+      <a href="https://github.com/Mintllo/MINova/releases/latest" target="_blank" rel="noopener" style="
+        display:inline-flex;align-items:center;gap:10px;
+        padding:16px 36px;border-radius:999px;
+        background:rgba(10,10,18,.92);color:#FAF9FD;
+        font-size:16px;font-weight:600;text-decoration:none;border-bottom:none;
+        box-shadow:0 6px 24px rgba(10,10,18,.16);transition:transform .15s,box-shadow .15s"
+        onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 10px 32px rgba(10,10,18,.22)'"
+        onmouseout="this.style.transform='';this.style.boxShadow='0 6px 24px rgba(10,10,18,.16)'">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        下载最新版
+      </a>
+      <a href="https://afdian.com/a/MINova" target="_blank" rel="noopener" style="
+        display:inline-flex;align-items:center;gap:10px;
+        padding:16px 36px;border-radius:999px;
+        border:1px solid rgba(10,10,18,.22);color:var(--ink);
+        font-size:16px;font-weight:600;text-decoration:none;border-bottom:1px solid rgba(10,10,18,.22);
+        transition:transform .15s,background-color .15s"
+        onmouseover="this.style.transform='translateY(-2px)';this.style.backgroundColor='rgba(10,10,18,.06)'"
+        onmouseout="this.style.transform='';this.style.backgroundColor=''">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        支持我们 · 爱发电
+      </a>
+    </div>
     <div class="foot">
       <div class="scroll up">SCROLL</div>
       <p class="note up">本次有重大更新，<b>bug 较多</b>。<br>后续会跟进修复。</p>
@@ -233,7 +248,7 @@
   <section class="screen s-film">
     <video id="v" src="video/MINova_promo_2026-11-25.mp4"
       autoplay muted loop playsinline preload="auto"></video>
-    <div class="film-meta"><span>UPDATE PREVIEW · 2026.11.25</span><span>1920 × 1080 / 69s</span></div>
+
   </section>
 
   <!-- 01 -->
@@ -286,18 +301,7 @@
     <h2 class="up">这只是一部分<br><span class="dim">已在 GitHub 开源</span></h2>
     <div class="row">
       <p class="up">Release 页可直接下载。<br>轻量、开源、云端同步。</p>
-      <div class="up" style="display:flex;flex-direction:column;gap:14px">
-        <a href="https://github.com/Mintllo/MINova/releases/latest" target="_blank" rel="noopener" style="
-          display:inline-flex;align-items:center;gap:10px;
-          padding:14px 32px;border-radius:999px;
-          background:rgba(10,10,18,.92);color:#FAF9FD;
-          font-size:16px;font-weight:600;text-decoration:none;border-bottom:none;
-          transition:transform .15s,box-shadow .15s">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          下载最新版
-        </a>
-        <a href="https://afdian.com/a/MINova" target="_blank" rel="noopener" style="font-size:14px;color:var(--soft);border-bottom:1px solid rgba(10,10,18,.16);padding-bottom:4px;">支持我们 · 爱发电</a>
-      </div>
+
     </div>
     <div class="foot-mark"><span>MINOVA</span><span>2026.11</span></div>
   </section>
