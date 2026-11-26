@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MINova - 免费开源的音乐聚合播放器</title>
+<meta name="description" content="MINova 是一款免费开源的 Android 音乐播放器：多平台音源聚合、3D 唱片架歌单、逐字歌词、液态玻璃设计。没有广告，没有会员。">
+<style>
+:root {
+  --primary: #4C6FFF;
+  --primary-dark: #3451D6;
+  --bg: #0C0E14;
+  --surface: #14161E;
+  --surface-2: #1C1F2B;
+  --text: #E8EAF2;
+  --text-muted: #9BA0B0;
+  --border: rgba(255,255,255,0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: "MiSans", "HarmonyOS Sans SC", "Noto Sans SC", -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--primary); text-decoration: none; }
+img { max-width: 100%; display: block; }
+
+/* Hero */
+.hero {
+  min-height: 92vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 20px;
+  background:
+    radial-gradient(900px 500px at 20% 10%, rgba(76,111,255,0.18) 0%, transparent 60%),
+    radial-gradient(700px 500px at 85% 90%, rgba(140,90,255,0.12) 0%, transparent 55%),
+    var(--bg);
+}
+.hero-inner { max-width: 760px; }
+.hero-badge {
+  display: inline-block;
+  padding: 6px 18px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  background: rgba(255,255,255,0.03);
+}
+.hero h1 {
+  font-size: clamp(38px, 7vw, 64px);
+  font-weight: 700;
+  letter-spacing: -1px;
+  line-height: 1.15;
+  margin-bottom: 20px;
+}
+.hero h1 .grad {
+  background: linear-gradient(120deg, #6C8FFF, #A78BFF);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.hero p.sub {
+  font-size: clamp(16px, 2.4vw, 19px);
+  color: var(--text-muted);
+  max-width: 560px;
+  margin: 0 auto 36px;
+}
+.hero-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 32px;
+  border-radius: 999px;
+  font-size: 15px; font-weight: 600;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.btn:hover { transform: translateY(-2px); }
+.btn-primary {
+  background: var(--primary); color: #fff;
+  box-shadow: 0 8px 28px rgba(76,111,255,0.35);
+}
+.btn-primary:hover { box-shadow: 0 12px 36px rgba(76,111,255,0.5); }
+.btn-ghost {
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: rgba(255,255,255,0.04);
+}
+.hero-meta {
+  margin-top: 42px;
+  display: flex; gap: 32px; justify-content: center; flex-wrap: wrap;
+  font-size: 13px; color: var(--text-muted);
+}
+.hero-meta span b { color: var(--text); font-weight: 600; }
+
+/* Sections */
+section { padding: 90px 20px; }
+.container { max-width: 1120px; margin: 0 auto; }
+.sec-title {
+  text-align: center;
+  font-size: clamp(26px, 4vw, 36px);
+  font-weight: 700;
+  margin-bottom: 14px;
+  letter-spacing: -0.5px;
+}
+.sec-sub { text-align: center; color: var(--text-muted); max-width: 560px; margin: 0 auto 56px; font-size: 15px; }
+
+/* Features */
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 18px;
+}
+.feature {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 28px 24px;
+  transition: transform .2s ease, border-color .2s ease;
+}
+.feature:hover { transform: translateY(-4px); border-color: rgba(76,111,255,0.35); }
+.feature .icon {
+  width: 46px; height: 46px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(76,111,255,0.22), rgba(140,90,255,0.16));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px;
+  margin-bottom: 16px;
+}
+.feature h3 { font-size: 17px; font-weight: 600; margin-bottom: 8px; }
+.feature p { font-size: 13.5px; color: var(--text-muted); }
+
+/* Screenshots */
+.shots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+}
+.shot {
+  border-radius: 20px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  transition: transform .25s ease, box-shadow .25s ease;
+}
+.shot:hover { transform: scale(1.02); box-shadow: 0 16px 48px rgba(0,0,0,0.45); }
+.shot img { width: 100%; height: auto; }
+.shot .cap {
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+}
+
+/* Download */
+.download-box {
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 56px 28px;
+}
+.download-box h2 { font-size: 28px; margin-bottom: 10px; }
+.download-box p { color: var(--text-muted); margin-bottom: 28px; font-size: 15px; }
+.dl-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.dl-note { margin-top: 22px; font-size: 12.5px; color: var(--text-muted); }
+
+/* Footer */
+footer {
+  border-top: 1px solid var(--border);
+  padding: 36px 20px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+footer .links { display: flex; gap: 22px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
+footer a:hover { text-decoration: underline; }
+
+@media (max-width: 640px) {
+  section { padding: 64px 16px; }
+  .hero-meta { gap: 18px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<div class="hero">
+  <div class="hero-inner">
+    <div class="hero-badge">开源免费 · GPL-3.0 · 无广告无会员</div>
+    <h1>你的音乐，<span class="grad">应有尽有</span></h1>
+    <p class="sub">MINova 是一款免费的 Android 音乐聚合播放器。多平台音源、3D 唱片架歌单、逐字歌词、液态玻璃设计——装上就能听，不需要登录任何账号。</p>
+    <div class="hero-btns">
+      <a class="btn btn-primary" href="https://github.com/Mintllo/MINova/releases/latest">下载最新版</a>
+      <a class="btn btn-ghost" href="https://github.com/Mintllo/MINova">GitHub 仓库</a>
+    </div>
+    <div class="hero-meta">
+      <span><b>6+</b> 音源平台</span>
+      <span><b>3D</b> 唱片架</span>
+      <span><b>0</b> 广告</span>
+      <span><b>100%</b> 免费</span>
+    </div>
+  </div>
+</div>
+
+<!-- Features -->
+<section>
+  <div class="container">
+    <h2 class="sec-title">功能一览</h2>
+    <p class="sec-sub">不只是能听歌——每一项功能都为体验而设计</p>
+    <div class="features">
+      <div class="feature"><div class="icon">🎵</div><h3>多平台音源聚合</h3><p>酷我 / 咪咕 / B站 / 网易云 / QQ音乐 / 酷狗，一首歌自动匹配最佳音源，VIP 歌、DJ 版大幅提升可播率。</p></div>
+      <div class="feature"><div class="icon">💿</div><h3>全新 3D 唱片架</h3><p>堆叠 / 简洁两种浏览模式，支持抽出唱片 360 度细细观摩，你的歌单从此有仪式感。</p></div>
+      <div class="feature"><div class="icon">🎤</div><h3>逐字歌词</h3><p>LRC 解析支持逐字时间戳（卡拉OK式）与翻译行，滚动顺滑，悬浮歌词可锁定可拖拽。</p></div>
+      <div class="feature"><div class="icon">📋</div><h3>歌单导入与云同步</h3><p>从各平台导入你的歌单，登录后自动云端同步——卸载重装、换设备，收藏一个不丢。</p></div>
+      <div class="feature"><div class="icon">🔮</div><h3>液态玻璃设计</h3><p>Material 3 Expressive + 液态玻璃双风格，真磨砂质感、按压果冻反馈、封面取色 C++ 加速。</p></div>
+      <div class="feature"><div class="icon">⬇️</div><h3>下载到本地</h3><p>支持断点续传与多通道加速，下载的歌离线也能听，登录后不怕丢。</p></div>
+      <div class="feature"><div class="icon">🧠</div><h3>推荐更懂你</h3><p>听过的歌悄悄影响后续推荐，每日 30 首稳定更新，越用越合口味。</p></div>
+      <div class="feature"><div class="icon">🚫</div><h3>零广告零会员</h3><p>没有开屏广告、没有算法推荐、没有会员体系。服务器费用靠用户自愿捐赠。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- Screenshots -->
+<section style="background: var(--surface);">
+  <div class="container">
+    <h2 class="sec-title">应用预览</h2>
+    <p class="sec-sub">真实界面截图，所见即所得</p>
+    <div class="shots-grid">
+      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_全新3D歌单.png" alt="全新3D歌单" loading="lazy"><div class="cap">全新 3D 歌单 · 堆叠式唱片架</div></div>
+      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/03_3D歌单_来源Current.png" alt="3D歌单来源" loading="lazy"><div class="cap">歌单来源 · 多平台导入</div></div>
+      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/04_全屏音乐播放页.png" alt="全屏播放页" loading="lazy"><div class="cap">全屏播放页 · 封面取色</div></div>
+      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/05_推荐与每日30首.png" alt="推荐与每日30首" loading="lazy"><div class="cap">推荐 · 每日 30 首</div></div>
+      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/06_听歌足迹.png" alt="听歌足迹" loading="lazy"><div class="cap">听歌足迹 · 本地统计</div></div>
+      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_双风格.png" alt="双风格" loading="lazy"><div class="cap">液态玻璃 / Material 3 双风格</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Download -->
+<section>
+  <div class="container">
+    <div class="download-box">
+      <h2>立即下载</h2>
+      <p>支持 Android 8.0+ · arm64-v8a · 约 34 MB</p>
+      <div class="dl-btns">
+        <a class="btn btn-primary" href="https://github.com/Mintllo/MINova/releases/latest">GitHub Releases</a>
+        <a class="btn btn-ghost" href="https://github.com/Mintllo/MINova/releases/latest/download/MINova_1.3.5_release.apk">直接下载 APK</a>
+      </div>
+      <div class="dl-note">应用内更新：我的 → 设置 → 检查更新 · 旧版本更新会自动走加速通道</div>
+    </div>
+  </div>
+</section>
+
+<!-- Donate -->
+<section style="padding-top: 0;">
+  <div class="container">
+    <div class="download-box" style="border-color: rgba(76,111,255,0.3);">
+      <h2>支持我们</h2>
+      <p>如果觉得好用的话，不妨来捐赠一下——服务器每个月都需要一点费用来维持运转，每一笔都会用于服务器。</p>
+      <div class="dl-btns">
+        <a class="btn btn-primary" href="https://afdian.com/a/MINova">前往爱发电</a>
+      </div>
+      <div class="dl-note">不管捐不捐，MINova 永远免费、永远没有广告。</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="links">
+    <a href="https://github.com/Mintllo/MINova">GitHub</a>
+    <a href="https://github.com/Mintllo/MINova/releases">更新日志</a>
+    <a href="https://afdian.com/a/MINova">爱发电</a>
+    <a href="https://github.com/Mintllo/MINova/blob/main/LICENSE">GPL-3.0 协议</a>
+  </div>
+  <div>© 2026 MINova Team · 用心做音乐播放器</div>
+</footer>
+
+</body>
+</html>
