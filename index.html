@@ -80,6 +80,63 @@
     letter-spacing:-.035em;
   }
   .s-cover h1 span{display:block}
+  /* 流光渐变大标题 */
+  .hero-title{position:relative}
+  .hero-title .line1{
+    display:block;
+    font-weight:640;
+    background:linear-gradient(100deg,
+      #FF6B8A 0%, #C08BFF 18%, #6FA8FF 36%, #6BFFD9 52%,
+      #FFD96B 68%, #FF6B8A 84%, #FF6B8A 100%);
+    background-size:300% 100%;
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    animation:flow 7s linear infinite, float 5.2s ease-in-out infinite;
+    filter:drop-shadow(0 6px 28px rgba(140,120,255,.28));
+  }
+  .hero-title .line2{
+    display:block;
+    font-weight:520;
+    background:linear-gradient(100deg,
+      #7A5CFF 0%, #4189FF 30%, #38C6B4 55%, #9169FF 80%, #7A5CFF 100%);
+    background-size:280% 100%;
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    animation:flow 9s linear infinite reverse, float 5.2s ease-in-out infinite 1.2s;
+    letter-spacing:.14em;
+  }
+  @keyframes flow{
+    0%{background-position:0% 50%}
+    100%{background-position:300% 50%}
+  }
+  @keyframes float{
+    0%,100%{transform:translateY(0)}
+    50%{transform:translateY(-10px)}
+  }
+  /* 下滑浏览提醒 */
+  .scroll-hint{
+    display:flex;flex-direction:column;align-items:center;gap:10px;
+    margin-top:7vh;
+    color:var(--faint);font-size:11px;letter-spacing:.4em;
+    opacity:0;animation:hintIn 1.4s ease 1.6s forwards;
+  }
+  .scroll-hint .mouse{
+    width:22px;height:36px;border:1.5px solid rgba(10,10,18,.30);
+    border-radius:12px;position:relative;
+  }
+  .scroll-hint .mouse::after{
+    content:'';position:absolute;left:50%;top:7px;
+    width:3px;height:7px;margin-left:-1.5px;
+    border-radius:3px;background:rgba(10,10,18,.45);
+    animation:wheel 1.8s cubic-bezier(.4,0,.6,1) infinite;
+  }
+  @keyframes wheel{
+    0%{transform:translateY(0);opacity:1}
+    70%{transform:translateY(11px);opacity:0}
+    100%{transform:translateY(0);opacity:0}
+  }
+  @keyframes hintIn{
+    from{opacity:0;transform:translateY(16px)}
+    to{opacity:1;transform:none}
+  }
   .s-cover h1 .accent{
     background:linear-gradient(96deg,#FF6B8A 0%,#9169FF 46%,#4189FF 92%);
     -webkit-background-clip:text;background-clip:text;color:transparent;
@@ -90,8 +147,6 @@
     font-size:15px;line-height:1.95;color:var(--soft);text-align:right;max-width:300px;
   }
   .s-cover .note b{font-weight:500;color:rgba(10,10,18,.78)}
-  .scroll{font-size:11px;letter-spacing:.3em;color:var(--faint);display:flex;align-items:center;gap:10px}
-  .scroll::after{content:'';display:block;width:44px;height:1px;background:var(--line)}
 
   /* ---------- 影片 ---------- */
   .s-film{padding:0;justify-content:center;align-items:center;overflow:hidden}
@@ -184,9 +239,9 @@
       <em>2026 / 11 / 25</em>
     </div>
 
-    <h1 class="up">
-      <span>MINova</span>
-      <span class="accent">官网</span>
+    <h1 class="up hero-title">
+      <span class="line1">MINova</span>
+      <span class="line2">官网</span>
     </h1>
 
     <div class="hero-btns up" style="margin-top:5vh;display:flex;gap:16px;flex-wrap:wrap">
@@ -213,9 +268,9 @@
         支持我们 爱发电
       </a>
     </div>
-    <div class="foot">
-      <div class="scroll up">SCROLL</div>
-      <p class="note up">本次有重大更新，<b>bug 较多</b>。<br>后续会跟进修复。</p>
+    <div class="scroll-hint up">
+      <div class="mouse"></div>
+      <span>往下滑浏览</span>
     </div>
   </section>
 
