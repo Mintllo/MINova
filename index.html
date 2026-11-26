@@ -4,239 +4,415 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MINova - 免费开源的音乐聚合播放器</title>
-<meta name="description" content="MINova 是一款免费开源的 Android 音乐播放器：多平台音源聚合、3D 唱片架歌单、逐字歌词、液态玻璃设计。没有广告，没有会员。">
+<meta name="description" content="MINova 是一款免费开源的 Android 音乐播放器：多平台音源聚合、3D 唱片架歌单、逐字歌词、Material Design 3 设计。没有广告，没有会员。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/icon?family=Material+Symbols+Rounded" rel="stylesheet">
 <style>
+/* ============================================================
+   MINova 官网 — Material Design 3 (Expressive)
+   动态取色（CSS 变量轮换主题色）+ MD3 组件规范
+   蓝白配色 · 明亮主题
+   ============================================================ */
+
 :root {
-  --primary: #4C6FFF;
-  --primary-dark: #3451D6;
-  --bg: #0C0E14;
-  --surface: #14161E;
-  --surface-2: #1C1F2B;
-  --text: #E8EAF2;
-  --text-muted: #9BA0B0;
-  --border: rgba(255,255,255,0.08);
+  /* M3 Light 主题 — 动态 primary（JS 轮换色相） */
+  --md-primary: #4C6FFF;
+  --md-on-primary: #FFFFFF;
+  --md-primary-container: #DEE4FF;
+  --md-on-primary-container: #001159;
+  --md-secondary: #595E72;
+  --md-secondary-container: #DEE1F9;
+  --md-on-secondary-container: #161B2C;
+  --md-tertiary: #735471;
+  --md-tertiary-container: #FFD8E9;
+  --md-on-tertiary-container: #2C1129;
+
+  --md-surface: #FAF9FE;
+  --md-surface-dim: #DBD9E4;
+  --md-surface-bright: #FAF9FE;
+  --md-surface-lowest: #FFFFFF;
+  --md-surface-low: #F4F3FA;
+  --md-surface-container: #EEEFF6;
+  --md-surface-container-high: #E8E9F1;
+  --md-surface-container-highest: #E2E3EB;
+  --md-on-surface: #1A1B21;
+  --md-on-surface-variant: #45464F;
+  --md-outline: #767680;
+  --md-outline-variant: #C6C5D0;
+
+  --md-error: #BA1A1A;
+  --md-error-container: #FFDAD6;
+
+  --md-shadow-1: 0 1px 2px rgba(15,18,34,.10), 0 1px 3px 1px rgba(15,18,34,.06);
+  --md-shadow-2: 0 1px 2px rgba(15,18,34,.12), 0 2px 6px 2px rgba(15,18,34,.08);
+  --md-shadow-3: 0 4px 8px 3px rgba(15,18,34,.10), 0 1px 3px rgba(15,18,34,.14);
+
+  --md-font: "Roboto", "Noto Sans SC", "MiSans", "HarmonyOS Sans SC", sans-serif;
+  --md-ease: cubic-bezier(.2, 0, 0, 1);
+
+  /* 动态渐变背景色组（5 组轮换） */
+  --bg-g1: rgba(76, 111, 255, 0.14);   /* 蓝 */
+  --bg-g2: rgba(139, 92, 246, 0.10);   /* 紫 */
+  --bg-g3: rgba(14, 165, 233, 0.12);   /* 青 */
+  --bg-g4: rgba(236, 72, 153, 0.08);   /* 粉 */
+  --bg-g5: rgba(34, 197, 94, 0.08);    /* 绿 */
 }
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html { scroll-behavior: smooth; }
+
 body {
-  font-family: "MiSans", "HarmonyOS Sans SC", "Noto Sans SC", -apple-system, "Segoe UI", sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  font-family: var(--md-font);
+  background: var(--md-surface);
+  color: var(--md-on-surface);
   line-height: 1.7;
   -webkit-font-smoothing: antialiased;
+  /* 动态背景渐变（跟随主题色轮换） */
+  background-image:
+    radial-gradient(1000px 600px at 15% -5%, var(--bg-g1) 0%, transparent 55%),
+    radial-gradient(800px 500px at 100% 25%, var(--bg-g2) 0%, transparent 50%),
+    radial-gradient(700px 500px at 5% 80%, var(--bg-g3) 0%, transparent 50%),
+    radial-gradient(600px 400px at 90% 95%, var(--bg-g4) 0%, transparent 45%);
+  background-attachment: fixed;
+  transition: background-image 1.2s var(--md-ease);
 }
-a { color: var(--primary); text-decoration: none; }
+
+a { color: var(--md-primary); text-decoration: none; }
 img { max-width: 100%; display: block; }
 
-/* Hero */
-.hero {
-  min-height: 92vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 40px 20px;
-  background:
-    radial-gradient(900px 500px at 20% 10%, rgba(76,111,255,0.18) 0%, transparent 60%),
-    radial-gradient(700px 500px at 85% 90%, rgba(140,90,255,0.12) 0%, transparent 55%),
-    var(--bg);
+/* Material Symbols */
+.ms {
+  font-family: "Material Symbols Rounded";
+  font-weight: normal; font-style: normal;
+  font-size: 24px; line-height: 1;
+  letter-spacing: normal; text-transform: none;
+  display: inline-block; white-space: nowrap;
+  word-wrap: normal; direction: ltr;
+  -webkit-font-feature-settings: "liga";
+  font-variation-settings: "FILL" 1, "wght" 500, "GRAD" 0, "opsz" 24;
 }
-.hero-inner { max-width: 760px; }
-.hero-badge {
-  display: inline-block;
-  padding: 6px 18px;
-  border: 1px solid var(--border);
+
+/* ============ M3 顶栏 ============ */
+.top-app-bar {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; gap: 16px;
+  padding: 10px 24px;
+  background: color-mix(in srgb, var(--md-surface) 82%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--md-outline-variant);
+}
+.tab-brand {
+  display: flex; align-items: center; gap: 12px;
+  font-weight: 700; font-size: 18px;
+  color: var(--md-on-surface);
+}
+.tab-brand .brand-mark {
+  width: 38px; height: 38px;
+  border-radius: 12px;
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; font-weight: 700;
+  font-family: var(--md-mono, monospace);
+}
+.tab-spacer { flex: 1; }
+.tab-link {
+  padding: 10px 18px;
   border-radius: 999px;
-  font-size: 13px;
-  color: var(--text-muted);
-  margin-bottom: 24px;
-  background: rgba(255,255,255,0.03);
+  font-size: 14px; font-weight: 500;
+  color: var(--md-on-surface-variant);
+  transition: background-color .15s;
 }
+.tab-link:hover { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+.tab-link.action {
+  background: var(--md-primary); color: var(--md-on-primary);
+  font-weight: 600;
+}
+
+/* ============ Hero ============ */
+.hero {
+  min-height: 88vh;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center;
+  padding: 48px 20px;
+}
+.hero-inner { max-width: 780px; }
+
+/* M3 Badge */
+.m3-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 16px;
+  background: var(--md-secondary-container);
+  color: var(--md-on-secondary-container);
+  border-radius: 8px;
+  font-size: 13px; font-weight: 500;
+  margin-bottom: 28px;
+}
+.m3-badge .ms { font-size: 16px; }
+
 .hero h1 {
-  font-size: clamp(38px, 7vw, 64px);
+  font-size: clamp(38px, 7vw, 62px);
   font-weight: 700;
-  letter-spacing: -1px;
-  line-height: 1.15;
+  letter-spacing: -1.5px;
+  line-height: 1.12;
   margin-bottom: 20px;
+  color: var(--md-on-surface);
 }
 .hero h1 .grad {
-  background: linear-gradient(120deg, #6C8FFF, #A78BFF);
-  -webkit-background-clip: text;
-  background-clip: text;
+  background: linear-gradient(120deg, var(--md-primary), color-mix(in srgb, var(--md-primary) 60%, #A78BFF));
+  -webkit-background-clip: text; background-clip: text;
   -webkit-text-fill-color: transparent;
+  transition: background .8s var(--md-ease);
 }
 .hero p.sub {
   font-size: clamp(16px, 2.4vw, 19px);
-  color: var(--text-muted);
-  max-width: 560px;
-  margin: 0 auto 36px;
+  color: var(--md-on-surface-variant);
+  max-width: 580px; margin: 0 auto 40px;
+}
+
+/* M3 Buttons */
+.m3-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 48px; padding: 0 28px;
+  border-radius: 999px;
+  font: inherit; font-size: 15px; font-weight: 600;
+  cursor: pointer;
+  transition: box-shadow .2s var(--md-ease), transform .1s, background-color .2s;
+  text-decoration: none !important;
+  position: relative;
+}
+.m3-btn:hover { box-shadow: var(--md-shadow-2); }
+.m3-btn:active { transform: scale(.97); }
+.m3-btn .ms { font-size: 20px; }
+.m3-btn.filled {
+  background: var(--md-primary); color: var(--md-on-primary);
+  box-shadow: var(--md-shadow-1);
+}
+.m3-btn.filled:hover { box-shadow: var(--md-shadow-3); }
+.m3-btn.tonal {
+  background: var(--md-secondary-container);
+  color: var(--md-on-secondary-container);
+}
+.m3-btn.outlined {
+  border: 1px solid var(--md-outline);
+  color: var(--md-primary); background: transparent;
 }
 .hero-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-.btn {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 14px 32px;
-  border-radius: 999px;
-  font-size: 15px; font-weight: 600;
-  transition: transform .15s ease, box-shadow .15s ease;
-}
-.btn:hover { transform: translateY(-2px); }
-.btn-primary {
-  background: var(--primary); color: #fff;
-  box-shadow: 0 8px 28px rgba(76,111,255,0.35);
-}
-.btn-primary:hover { box-shadow: 0 12px 36px rgba(76,111,255,0.5); }
-.btn-ghost {
-  border: 1px solid var(--border);
-  color: var(--text);
-  background: rgba(255,255,255,0.04);
-}
-.hero-meta {
-  margin-top: 42px;
-  display: flex; gap: 32px; justify-content: center; flex-wrap: wrap;
-  font-size: 13px; color: var(--text-muted);
-}
-.hero-meta span b { color: var(--text); font-weight: 600; }
 
-/* Sections */
-section { padding: 90px 20px; }
+/* M3 Assist chips */
+.hero-chips {
+  margin-top: 44px;
+  display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+}
+.m3-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 14px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 8px;
+  font-size: 13px; font-weight: 500;
+  color: var(--md-on-surface-variant);
+  background: transparent;
+}
+.m3-chip .ms { font-size: 18px; color: var(--md-primary); }
+.m3-chip b { color: var(--md-on-surface); }
+
+/* ============ Sections ============ */
+section { padding: 96px 24px; }
 .container { max-width: 1120px; margin: 0 auto; }
 .sec-title {
   text-align: center;
-  font-size: clamp(26px, 4vw, 36px);
+  font-size: clamp(28px, 4.5vw, 38px);
   font-weight: 700;
-  margin-bottom: 14px;
   letter-spacing: -0.5px;
+  margin-bottom: 12px;
+  color: var(--md-on-surface);
 }
-.sec-sub { text-align: center; color: var(--text-muted); max-width: 560px; margin: 0 auto 56px; font-size: 15px; }
+.sec-sub {
+  text-align: center; color: var(--md-on-surface-variant);
+  max-width: 560px; margin: 0 auto 56px; font-size: 15px;
+}
 
-/* Features */
+/* M3 Cards */
+.m3-card {
+  background: var(--md-surface-container-low);
+  border-radius: 16px;
+  box-shadow: var(--md-shadow-1);
+  padding: 28px 24px;
+  transition: transform .2s var(--md-ease), box-shadow .2s, background-color .2s;
+}
+.m3-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--md-shadow-2);
+  background: var(--md-surface-container);
+}
+.m3-card .card-icon {
+  width: 48px; height: 48px;
+  border-radius: 14px;
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+  display: flex; align-items: center; justify-content: center;
+  margin-bottom: 16px;
+}
+.m3-card h3 { font-size: 17px; font-weight: 600; margin-bottom: 8px; color: var(--md-on-surface); }
+.m3-card p { font-size: 13.5px; color: var(--md-on-surface-variant); }
+
 .features {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 18px;
+  gap: 16px;
 }
-.feature {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 28px 24px;
-  transition: transform .2s ease, border-color .2s ease;
-}
-.feature:hover { transform: translateY(-4px); border-color: rgba(76,111,255,0.35); }
-.feature .icon {
-  width: 46px; height: 46px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(76,111,255,0.22), rgba(140,90,255,0.16));
-  display: flex; align-items: center; justify-content: center;
-  font-size: 22px;
-  margin-bottom: 16px;
-}
-.feature h3 { font-size: 17px; font-weight: 600; margin-bottom: 8px; }
-.feature p { font-size: 13.5px; color: var(--text-muted); }
 
-/* Screenshots */
+/* ============ Screenshots（M3 Carousel 风格） ============ */
 .shots-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 20px;
 }
-.shot {
+.m3-shot {
   border-radius: 20px;
   overflow: hidden;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  transition: transform .25s ease, box-shadow .25s ease;
+  background: var(--md-surface-container-low);
+  box-shadow: var(--md-shadow-1);
+  transition: transform .25s var(--md-ease), box-shadow .25s;
 }
-.shot:hover { transform: scale(1.02); box-shadow: 0 16px 48px rgba(0,0,0,0.45); }
-.shot img { width: 100%; height: auto; }
-.shot .cap {
+.m3-shot:hover { transform: scale(1.03); box-shadow: var(--md-shadow-3); }
+.m3-shot img { width: 100%; height: auto; }
+.m3-shot .cap {
   padding: 12px 16px;
-  font-size: 13px;
-  color: var(--text-muted);
-  border-top: 1px solid var(--border);
+  font-size: 13px; font-weight: 500;
+  color: var(--md-on-surface-variant);
+  border-top: 1px solid var(--md-outline-variant);
+  display: flex; align-items: center; gap: 8px;
 }
+.m3-shot .cap .ms { font-size: 18px; color: var(--md-primary); }
 
-/* Download */
+/* ============ M3 Filled Card 下载区 ============ */
 .download-box {
   text-align: center;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 24px;
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+  border-radius: 28px;
   padding: 56px 28px;
 }
-.download-box h2 { font-size: 28px; margin-bottom: 10px; }
-.download-box p { color: var(--text-muted); margin-bottom: 28px; font-size: 15px; }
-.dl-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-.dl-note { margin-top: 22px; font-size: 12.5px; color: var(--text-muted); }
+.download-box h2 { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
+.download-box p { margin-bottom: 28px; font-size: 15px; opacity: .85; }
+.download-box .dl-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.download-box .m3-btn.on-container {
+  background: var(--md-on-primary-container); color: var(--md-primary-container);
+}
+.download-box .m3-btn.inverse {
+  background: var(--md-surface-lowest); color: var(--md-on-surface);
+}
+.download-box .dl-note { margin-top: 22px; font-size: 12.5px; opacity: .65; }
 
-/* Footer */
+/* 捐赠卡片 */
+.donate-box {
+  text-align: center;
+  background: var(--md-tertiary-container);
+  color: var(--md-on-tertiary-container);
+  border-radius: 28px;
+  padding: 48px 28px;
+}
+.donate-box h2 { font-size: 24px; font-weight: 700; margin-bottom: 10px; }
+.donate-box p { margin-bottom: 24px; font-size: 15px; opacity: .85; }
+.donate-box .m3-btn { background: var(--md-on-tertiary-container); color: var(--md-tertiary-container); }
+.donate-box .dl-note { margin-top: 18px; font-size: 12.5px; opacity: .65; }
+
+/* ============ M3 Footer ============ */
 footer {
-  border-top: 1px solid var(--border);
-  padding: 36px 20px;
+  border-top: 1px solid var(--md-outline-variant);
+  padding: 40px 24px;
   text-align: center;
   font-size: 13px;
-  color: var(--text-muted);
+  color: var(--md-on-surface-variant);
+  background: var(--md-surface-container);
 }
-footer .links { display: flex; gap: 22px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
-footer a:hover { text-decoration: underline; }
+footer .links { display: flex; gap: 24px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
+footer .links a { color: var(--md-on-surface); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+footer .links a:hover { color: var(--md-primary); }
+footer .links .ms { font-size: 18px; }
 
 @media (max-width: 640px) {
   section { padding: 64px 16px; }
-  .hero-meta { gap: 18px; }
+  .top-app-bar { padding: 8px 16px; }
+  .tab-link { display: none; }
+  .tab-link.action { display: inline-flex; }
 }
 </style>
 </head>
 <body>
 
+<!-- M3 顶栏 -->
+<nav class="top-app-bar">
+  <div class="tab-brand">
+    <div class="brand-mark">MI</div>
+    MINova
+  </div>
+  <div class="tab-spacer"></div>
+  <a class="tab-link" href="#features">功能</a>
+  <a class="tab-link" href="#screenshots">预览</a>
+  <a class="tab-link" href="https://afdian.com/a/MINova">支持我们</a>
+  <a class="tab-link action" href="https://github.com/Mintllo/MINova/releases/latest">
+    <span class="ms" style="font-size:18px;">download</span> 下载
+  </a>
+</nav>
+
 <!-- Hero -->
 <div class="hero">
   <div class="hero-inner">
-    <div class="hero-badge">开源免费 · GPL-3.0 · 无广告无会员</div>
+    <div class="m3-badge"><span class="ms">verified</span> 开源免费 · GPL-3.0 · 无广告无会员</div>
     <h1>你的音乐，<span class="grad">应有尽有</span></h1>
-    <p class="sub">MINova 是一款免费的 Android 音乐聚合播放器。多平台音源、3D 唱片架歌单、逐字歌词、液态玻璃设计——装上就能听，不需要登录任何账号。</p>
+    <p class="sub">MINova 是一款免费的 Android 音乐聚合播放器。多平台音源、3D 唱片架歌单、逐字歌词、Material Design 3 设计——装上就能听，不需要登录任何账号。</p>
     <div class="hero-btns">
-      <a class="btn btn-primary" href="https://github.com/Mintllo/MINova/releases/latest">下载最新版</a>
-      <a class="btn btn-ghost" href="https://github.com/Mintllo/MINova">GitHub 仓库</a>
+      <a class="m3-btn filled" href="https://github.com/Mintllo/MINova/releases/latest">
+        <span class="ms">download</span> 下载最新版
+      </a>
+      <a class="m3-btn tonal" href="https://github.com/Mintllo/MINova">
+        <span class="ms">code</span> GitHub 仓库
+      </a>
     </div>
-    <div class="hero-meta">
-      <span><b>6+</b> 音源平台</span>
-      <span><b>3D</b> 唱片架</span>
-      <span><b>0</b> 广告</span>
-      <span><b>100%</b> 免费</span>
+    <div class="hero-chips">
+      <span class="m3-chip"><span class="ms">library_music</span> <b>6+</b> 音源平台</span>
+      <span class="m3-chip"><span class="ms">album</span> <b>3D</b> 唱片架</span>
+      <span class="m3-chip"><span class="ms">block</span> <b>0</b> 广告</span>
+      <span class="m3-chip"><span class="ms">favorite</span> <b>100%</b> 免费</span>
     </div>
   </div>
 </div>
 
 <!-- Features -->
-<section>
+<section id="features">
   <div class="container">
     <h2 class="sec-title">功能一览</h2>
     <p class="sec-sub">不只是能听歌——每一项功能都为体验而设计</p>
     <div class="features">
-      <div class="feature"><div class="icon">🎵</div><h3>多平台音源聚合</h3><p>酷我 / 咪咕 / B站 / 网易云 / QQ音乐 / 酷狗，一首歌自动匹配最佳音源，VIP 歌、DJ 版大幅提升可播率。</p></div>
-      <div class="feature"><div class="icon">💿</div><h3>全新 3D 唱片架</h3><p>堆叠 / 简洁两种浏览模式，支持抽出唱片 360 度细细观摩，你的歌单从此有仪式感。</p></div>
-      <div class="feature"><div class="icon">🎤</div><h3>逐字歌词</h3><p>LRC 解析支持逐字时间戳（卡拉OK式）与翻译行，滚动顺滑，悬浮歌词可锁定可拖拽。</p></div>
-      <div class="feature"><div class="icon">📋</div><h3>歌单导入与云同步</h3><p>从各平台导入你的歌单，登录后自动云端同步——卸载重装、换设备，收藏一个不丢。</p></div>
-      <div class="feature"><div class="icon">🔮</div><h3>液态玻璃设计</h3><p>Material 3 Expressive + 液态玻璃双风格，真磨砂质感、按压果冻反馈、封面取色 C++ 加速。</p></div>
-      <div class="feature"><div class="icon">⬇️</div><h3>下载到本地</h3><p>支持断点续传与多通道加速，下载的歌离线也能听，登录后不怕丢。</p></div>
-      <div class="feature"><div class="icon">🧠</div><h3>推荐更懂你</h3><p>听过的歌悄悄影响后续推荐，每日 30 首稳定更新，越用越合口味。</p></div>
-      <div class="feature"><div class="icon">🚫</div><h3>零广告零会员</h3><p>没有开屏广告、没有算法推荐、没有会员体系。服务器费用靠用户自愿捐赠。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">library_music</span></div><h3>多平台音源聚合</h3><p>酷我 / 咪咕 / B站 / 网易云 / QQ音乐 / 酷狗，一首歌自动匹配最佳音源，VIP 歌、DJ 版大幅提升可播率。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">album</span></div><h3>全新 3D 唱片架</h3><p>堆叠 / 简洁两种浏览模式，支持抽出唱片 360 度细细观摩，你的歌单从此有仪式感。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">mic</span></div><h3>逐字歌词</h3><p>LRC 解析支持逐字时间戳（卡拉OK式）与翻译行，滚动顺滑，悬浮歌词可锁定可拖拽。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">cloud_sync</span></div><h3>歌单导入与云同步</h3><p>从各平台导入你的歌单，登录后自动云端同步——卸载重装、换设备，收藏一个不丢。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">auto_awesome</span></div><h3>液态玻璃设计</h3><p>Material 3 Expressive + 液态玻璃双风格，真磨砂质感、按压果冻反馈、封面取色 C++ 加速。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">download</span></div><h3>下载到本地</h3><p>支持断点续传与多通道加速，下载的歌离线也能听，登录后不怕丢。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">psychology</span></div><h3>推荐更懂你</h3><p>听过的歌悄悄影响后续推荐，每日 30 首稳定更新，越用越合口味。</p></div>
+      <div class="m3-card"><div class="card-icon"><span class="ms">block</span></div><h3>零广告零会员</h3><p>没有开屏广告、没有算法推荐、没有会员体系。服务器费用靠用户自愿捐赠。</p></div>
     </div>
   </div>
 </section>
 
 <!-- Screenshots -->
-<section style="background: var(--surface);">
+<section id="screenshots" style="background: var(--md-surface-container);">
   <div class="container">
     <h2 class="sec-title">应用预览</h2>
     <p class="sec-sub">真实界面截图，所见即所得</p>
     <div class="shots-grid">
-      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_全新3D歌单.png" alt="全新3D歌单" loading="lazy"><div class="cap">全新 3D 歌单 · 堆叠式唱片架</div></div>
-      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/03_3D歌单_来源Current.png" alt="3D歌单来源" loading="lazy"><div class="cap">歌单来源 · 多平台导入</div></div>
-      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/04_全屏音乐播放页.png" alt="全屏播放页" loading="lazy"><div class="cap">全屏播放页 · 封面取色</div></div>
-      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/05_推荐与每日30首.png" alt="推荐与每日30首" loading="lazy"><div class="cap">推荐 · 每日 30 首</div></div>
-      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/06_听歌足迹.png" alt="听歌足迹" loading="lazy"><div class="cap">听歌足迹 · 本地统计</div></div>
-      <div class="shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_双风格.png" alt="双风格" loading="lazy"><div class="cap">液态玻璃 / Material 3 双风格</div></div>
+      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_全新3D歌单.png" alt="全新3D歌单" loading="lazy"><div class="cap"><span class="ms">album</span> 全新 3D 歌单 · 堆叠式唱片架</div></div>
+      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/03_3D歌单_来源Current.png" alt="3D歌单来源" loading="lazy"><div class="cap"><span class="ms">source</span> 歌单来源 · 多平台导入</div></div>
+      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/04_全屏音乐播放页.png" alt="全屏播放页" loading="lazy"><div class="cap"><span class="ms">music_note</span> 全屏播放页 · 封面取色</div></div>
+      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/05_推荐与每日30首.png" alt="推荐与每日30首" loading="lazy"><div class="cap"><span class="ms">explore</span> 推荐 · 每日 30 首</div></div>
+      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/06_听歌足迹.png" alt="听歌足迹" loading="lazy"><div class="cap"><span class="ms">timeline</span> 听歌足迹 · 本地统计</div></div>
+      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_双风格.png" alt="双风格" loading="lazy"><div class="cap"><span class="ms">style</span> 液态玻璃 / Material 3 双风格</div></div>
     </div>
   </div>
 </section>
@@ -248,8 +424,12 @@ footer a:hover { text-decoration: underline; }
       <h2>立即下载</h2>
       <p>支持 Android 8.0+ · arm64-v8a · 约 34 MB</p>
       <div class="dl-btns">
-        <a class="btn btn-primary" href="https://github.com/Mintllo/MINova/releases/latest">GitHub Releases</a>
-        <a class="btn btn-ghost" href="https://github.com/Mintllo/MINova/releases/latest/download/MINova_1.3.5_release.apk">直接下载 APK</a>
+        <a class="m3-btn on-container" href="https://github.com/Mintllo/MINova/releases/latest">
+          <span class="ms">open_in_new</span> GitHub Releases
+        </a>
+        <a class="m3-btn inverse" href="https://github.com/Mintllo/MINova/releases/latest/download/MINova_1.3.5_release.apk">
+          <span class="ms">download</span> 直接下载 APK
+        </a>
       </div>
       <div class="dl-note">应用内更新：我的 → 设置 → 检查更新 · 旧版本更新会自动走加速通道</div>
     </div>
@@ -259,12 +439,12 @@ footer a:hover { text-decoration: underline; }
 <!-- Donate -->
 <section style="padding-top: 0;">
   <div class="container">
-    <div class="download-box" style="border-color: rgba(76,111,255,0.3);">
-      <h2>支持我们</h2>
+    <div class="donate-box">
+      <h2><span class="ms" style="vertical-align:-4px;">favorite</span> 支持我们</h2>
       <p>如果觉得好用的话，不妨来捐赠一下——服务器每个月都需要一点费用来维持运转，每一笔都会用于服务器。</p>
-      <div class="dl-btns">
-        <a class="btn btn-primary" href="https://afdian.com/a/MINova">前往爱发电</a>
-      </div>
+      <a class="m3-btn" href="https://afdian.com/a/MINova">
+        <span class="ms">volunteer_activism</span> 前往爱发电
+      </a>
       <div class="dl-note">不管捐不捐，MINova 永远免费、永远没有广告。</div>
     </div>
   </div>
@@ -272,13 +452,83 @@ footer a:hover { text-decoration: underline; }
 
 <footer>
   <div class="links">
-    <a href="https://github.com/Mintllo/MINova">GitHub</a>
-    <a href="https://github.com/Mintllo/MINova/releases">更新日志</a>
-    <a href="https://afdian.com/a/MINova">爱发电</a>
-    <a href="https://github.com/Mintllo/MINova/blob/main/LICENSE">GPL-3.0 协议</a>
+    <a href="https://github.com/Mintllo/MINova"><span class="ms">code</span> GitHub</a>
+    <a href="https://github.com/Mintllo/MINova/releases"><span class="ms">history</span> 更新日志</a>
+    <a href="https://afdian.com/a/MINova"><span class="ms">volunteer_activism</span> 爱发电</a>
+    <a href="https://github.com/Mintllo/MINova/blob/main/LICENSE"><span class="ms">gavel</span> GPL-3.0 协议</a>
   </div>
   <div>© 2026 MINova Team · 用心做音乐播放器</div>
 </footer>
+
+<script>
+/* ============================================================
+   MD3 动态取色 — 5 组主题色轮换（蓝→紫→青→粉→绿）
+   通过 CSS 变量实现，每 8 秒平滑过渡一次
+   同时更新背景渐变色和 primary 系列
+   ============================================================ */
+const themes = [
+  { /* 蓝（默认） */
+    primary: "#4C6FFF", onPrimary: "#FFFFFF",
+    primaryContainer: "#DEE4FF", onPrimaryContainer: "#001159",
+    g1: "rgba(76, 111, 255, 0.14)", g2: "rgba(139, 92, 246, 0.10)",
+    g3: "rgba(14, 165, 233, 0.12)", g4: "rgba(236, 72, 153, 0.08)",
+  },
+  { /* 紫 */
+    primary: "#7C5FFF", onPrimary: "#FFFFFF",
+    primaryContainer: "#E6DEFF", onPrimaryContainer: "#220059",
+    g1: "rgba(139, 92, 246, 0.14)", g2: "rgba(76, 111, 255, 0.10)",
+    g3: "rgba(236, 72, 153, 0.10)", g4: "rgba(14, 165, 233, 0.08)",
+  },
+  { /* 青 */
+    primary: "#0EA5E9", onPrimary: "#FFFFFF",
+    primaryContainer: "#D3EEFF", onPrimaryContainer: "#001E31",
+    g1: "rgba(14, 165, 233, 0.14)", g2: "rgba(34, 197, 94, 0.10)",
+    g3: "rgba(76, 111, 255, 0.10)", g4: "rgba(139, 92, 246, 0.08)",
+  },
+  { /* 粉 */
+    primary: "#EC4899", onPrimary: "#FFFFFF",
+    primaryContainer: "#FFD8E9", onPrimaryContainer: "#2C1129",
+    g1: "rgba(236, 72, 153, 0.12)", g2: "rgba(124, 95, 255, 0.10)",
+    g3: "rgba(255, 100, 100, 0.08)", g4: "rgba(14, 165, 233, 0.08)",
+  },
+  { /* 绿 */
+    primary: "#16A34A", onPrimary: "#FFFFFF",
+    primaryContainer: "#B6F2C0", onPrimaryContainer: "#003912",
+    g1: "rgba(34, 197, 94, 0.12)", g2: "rgba(14, 165, 233, 0.10)",
+    g3: "rgba(76, 111, 255, 0.08)", g4: "rgba(236, 72, 153, 0.06)",
+  },
+];
+
+let current = 0;
+function applyTheme(idx) {
+  const th = themes[idx];
+  const root = document.documentElement.style;
+  root.setProperty("--md-primary", th.primary);
+  root.setProperty("--md-on-primary", th.onPrimary);
+  root.setProperty("--md-primary-container", th.primaryContainer);
+  root.setProperty("--md-on-primary-container", th.onPrimaryContainer);
+  root.setProperty("--bg-g1", th.g1);
+  root.setProperty("--bg-g2", th.g2);
+  root.setProperty("--bg-g3", th.g3);
+  root.setProperty("--bg-g4", th.g4);
+}
+
+// 首次加载应用主题 0
+applyTheme(0);
+
+// 每 8 秒轮换到下一主题
+setInterval(() => {
+  current = (current + 1) % themes.length;
+  applyTheme(current);
+}, 8000);
+
+// 用户滚动时暂缓轮换（避免阅读时颜色跳变）
+let scrollTimer = null;
+window.addEventListener("scroll", () => {
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(() => {}, 3000);
+});
+</script>
 
 </body>
 </html>
