@@ -1,534 +1,320 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MINova - 免费开源的音乐聚合播放器</title>
-<meta name="description" content="MINova 是一款免费开源的 Android 音乐播放器：多平台音源聚合、3D 唱片架歌单、逐字歌词、Material Design 3 设计。没有广告，没有会员。">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/icon?family=Material+Symbols+Rounded" rel="stylesheet">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MINova · 11月25 更新预览</title>
+<link rel="stylesheet" href="web/misans/MiSansVF.min.css">
 <style>
-/* ============================================================
-   MINova 官网 — Material Design 3 (Expressive)
-   动态取色（CSS 变量轮换主题色）+ MD3 组件规范
-   蓝白配色 · 明亮主题
-   ============================================================ */
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{
+    --ink:#0A0A12;
+    --soft:rgba(10,10,18,.52);
+    --faint:rgba(10,10,18,.30);
+    --line:rgba(10,10,18,.13);
+    --bg:#FAF9FD;
+  }
+  html{scroll-behavior:smooth;scroll-snap-type:y proximity;background:var(--bg)}
+  body{
+    background:transparent;color:var(--ink);
+    font-family:'MiSans VF','MiSans','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;overflow-x:hidden;
+  }
 
-:root {
-  /* M3 Light 主题 — 动态 primary（JS 轮换色相） */
-  --md-primary: #4C6FFF;
-  --md-on-primary: #FFFFFF;
-  --md-primary-container: #DEE4FF;
-  --md-on-primary-container: #001159;
-  --md-secondary: #595E72;
-  --md-secondary-container: #DEE1F9;
-  --md-on-secondary-container: #161B2C;
-  --md-tertiary: #735471;
-  --md-tertiary-container: #FFD8E9;
-  --md-on-tertiary-container: #2C1129;
+  /* ================= 动态背景 ================= */
+  .sky{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+  .sky i{position:absolute;display:block;border-radius:50%;will-change:transform}
+  .sky .b1{width:78vw;height:78vw;left:-30vw;top:-34vw;
+    background:radial-gradient(circle,rgba(255,150,172,.46) 0%,rgba(255,150,172,.16) 42%,rgba(255,150,172,0) 68%);
+    animation:d1 24s ease-in-out infinite}
+  .sky .b2{width:66vw;height:66vw;right:-26vw;top:-22vw;
+    background:radial-gradient(circle,rgba(124,166,255,.46) 0%,rgba(124,166,255,.15) 42%,rgba(124,166,255,0) 68%);
+    animation:d2 31s ease-in-out infinite}
+  .sky .b3{width:60vw;height:60vw;right:-18vw;bottom:-26vw;
+    background:radial-gradient(circle,rgba(186,146,255,.42) 0%,rgba(186,146,255,.14) 42%,rgba(186,146,255,0) 68%);
+    animation:d3 37s ease-in-out infinite}
+  .sky .b4{width:54vw;height:54vw;left:-18vw;bottom:-22vw;
+    background:radial-gradient(circle,rgba(255,198,138,.42) 0%,rgba(255,198,138,.14) 42%,rgba(255,198,138,0) 68%);
+    animation:d4 28s ease-in-out infinite}
+  @keyframes d1{0%,100%{transform:translate3d(0,0,0) scale(1)}50%{transform:translate3d(7vw,5vh,0) scale(1.14)}}
+  @keyframes d2{0%,100%{transform:translate3d(0,0,0) scale(1.06)}50%{transform:translate3d(-7vw,6vh,0) scale(.94)}}
+  @keyframes d3{0%,100%{transform:translate3d(0,0,0) scale(1)}50%{transform:translate3d(-6vw,-5vh,0) scale(1.16)}}
+  @keyframes d4{0%,100%{transform:translate3d(0,0,0) scale(1.08)}50%{transform:translate3d(6vw,-6vh,0) scale(.96)}}
 
-  --md-surface: #FAF9FE;
-  --md-surface-dim: #DBD9E4;
-  --md-surface-bright: #FAF9FE;
-  --md-surface-lowest: #FFFFFF;
-  --md-surface-low: #F4F3FA;
-  --md-surface-container: #EEEFF6;
-  --md-surface-container-high: #E8E9F1;
-  --md-surface-container-highest: #E2E3EB;
-  --md-on-surface: #1A1B21;
-  --md-on-surface-variant: #45464F;
-  --md-outline: #767680;
-  --md-outline-variant: #C6C5D0;
+  /* 斜扫光带 */
+  .sky .band{position:absolute;top:-40vh;left:-60vw;width:44vw;height:180vh;
+    background:linear-gradient(90deg,
+      rgba(255,255,255,0) 0%,
+      rgba(255,178,196,.20) 26%,
+      rgba(206,190,255,.26) 48%,
+      rgba(160,200,255,.20) 68%,
+      rgba(255,255,255,0) 100%);
+    transform:rotate(-14deg);animation:sweep 13s cubic-bezier(.45,0,.55,1) infinite}
+  @keyframes sweep{
+    0%{transform:translate3d(0,0,0) rotate(-14deg);opacity:0}
+    12%{opacity:1}
+    72%{opacity:1}
+    100%{transform:translate3d(190vw,0,0) rotate(-14deg);opacity:0}
+  }
 
-  --md-error: #BA1A1A;
-  --md-error-container: #FFDAD6;
+  /* 浮尘 */
+  .sky .p{position:absolute;border-radius:50%;opacity:.55}
+  .sky .p1{width:14px;height:14px;left:12%;bottom:-4vh;
+    background:radial-gradient(circle,rgba(255,168,188,.9),rgba(255,168,188,0) 70%);
+    animation:up 26s linear infinite}
+  .sky .p2{width:9px;height:9px;left:31%;bottom:-4vh;
+    background:radial-gradient(circle,rgba(150,190,255,.9),rgba(150,190,255,0) 70%);
+    animation:up 34s linear infinite 4s}
+  .sky .p3{width:20px;height:20px;left:57%;bottom:-4vh;
+    background:radial-gradient(circle,rgba(200,172,255,.85),rgba(200,172,255,0) 70%);
+    animation:up 30s linear infinite 9s}
+  .sky .p4{width:11px;height:11px;left:76%;bottom:-4vh;
+    background:radial-gradient(circle,rgba(255,190,150,.9),rgba(255,190,150,0) 70%);
+    animation:up 38s linear infinite 2s}
+  .sky .p5{width:7px;height:7px;left:89%;bottom:-4vh;
+    background:radial-gradient(circle,rgba(150,190,255,.9),rgba(150,190,255,0) 70%);
+    animation:up 22s linear infinite 13s}
+  @keyframes up{
+    0%{transform:translate3d(0,0,0);opacity:0}
+    10%{opacity:.6}
+    85%{opacity:.35}
+    100%{transform:translate3d(4vw,-116vh,0);opacity:0}
+  }
 
-  --md-shadow-1: 0 1px 2px rgba(15,18,34,.10), 0 1px 3px 1px rgba(15,18,34,.06);
-  --md-shadow-2: 0 1px 2px rgba(15,18,34,.12), 0 2px 6px 2px rgba(15,18,34,.08);
-  --md-shadow-3: 0 4px 8px 3px rgba(15,18,34,.10), 0 1px 3px rgba(15,18,34,.14);
+  /* ================= 版式 ================= */
+  .page{position:relative;z-index:1}
+  .screen{
+    position:relative;min-height:100vh;min-height:100svh;
+    padding:6.5vh 6vw 7vh;
+    display:flex;flex-direction:column;justify-content:center;
+    scroll-snap-align:start;
+  }
+  .rule{position:absolute;left:6vw;right:6vw;top:0;height:1px;background:var(--line)}
+  .brand{font-size:14px;letter-spacing:.34em;color:var(--faint);font-weight:600}
 
-  --md-font: "Roboto", "Noto Sans SC", "MiSans", "HarmonyOS Sans SC", sans-serif;
-  --md-ease: cubic-bezier(.2, 0, 0, 1);
+  /* ---------- 封面 ---------- */
+  .s-cover{justify-content:space-between}
+  .s-cover .top{display:flex;justify-content:space-between;align-items:baseline}
+  .s-cover .top em{font-style:normal;font-size:13px;letter-spacing:.2em;color:var(--faint)}
+  .s-cover h1{
+    font-size:clamp(62px,10.4vw,168px);line-height:1.04;font-weight:440;
+    letter-spacing:-.035em;
+  }
+  .s-cover h1 span{display:block}
+  .s-cover h1 .accent{
+    background:linear-gradient(96deg,#FF6B8A 0%,#9169FF 46%,#4189FF 92%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    padding-right:.1em;
+  }
+  .s-cover .foot{display:flex;justify-content:space-between;align-items:flex-end;gap:40px}
+  .s-cover .note{
+    font-size:15px;line-height:1.95;color:var(--soft);text-align:right;max-width:300px;
+  }
+  .s-cover .note b{font-weight:500;color:rgba(10,10,18,.78)}
+  .scroll{font-size:11px;letter-spacing:.3em;color:var(--faint);display:flex;align-items:center;gap:10px}
+  .scroll::after{content:'';display:block;width:44px;height:1px;background:var(--line)}
 
-  /* 动态渐变背景色组（5 组轮换） */
-  --bg-g1: rgba(76, 111, 255, 0.14);   /* 蓝 */
-  --bg-g2: rgba(139, 92, 246, 0.10);   /* 紫 */
-  --bg-g3: rgba(14, 165, 233, 0.12);   /* 青 */
-  --bg-g4: rgba(236, 72, 153, 0.08);   /* 粉 */
-  --bg-g5: rgba(34, 197, 94, 0.08);    /* 绿 */
-}
+  /* ---------- 影片 ---------- */
+  .s-film{padding:0;justify-content:center;align-items:center;overflow:hidden}
+  .s-film video{width:100vw;height:100vh;height:100svh;object-fit:contain;display:block;background:transparent}
+  .film-meta{
+    position:absolute;left:6vw;right:6vw;bottom:5vh;
+    display:flex;justify-content:space-between;
+    font-size:11px;letter-spacing:.22em;color:var(--faint);pointer-events:none;
+  }
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+  /* ---------- 功能屏 ---------- */
+  .s-feat{
+    display:grid;grid-template-columns:1fr 1fr;align-items:center;
+    height:100vh;height:100svh;padding:0;overflow:hidden;
+  }
+  .s-feat .copy{padding:0 5vw 0 6vw;max-width:640px}
+  .s-feat.flip .copy{order:2;padding:0 6vw 0 5vw}
+  .s-feat .idx{
+    display:block;font-size:12px;letter-spacing:.34em;color:var(--faint);
+    font-variant-numeric:tabular-nums;margin-bottom:5vh;
+  }
+  .s-feat h2{
+    font-size:clamp(34px,4.6vw,72px);line-height:1.06;font-weight:440;
+    letter-spacing:-.028em;margin-bottom:3.4vh;
+  }
+  .s-feat p{font-size:16px;line-height:2;color:var(--soft);max-width:26em}
+  .s-feat .shot{position:relative;height:100%;overflow:hidden}
+  .s-feat.flip .shot{order:1}
+  .s-feat .shot img{
+    position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    object-position:0% 50%;
+    -webkit-mask-image:radial-gradient(ellipse 82% 72% at 44% 50%,#000 48%,rgba(0,0,0,0) 88%);
+    mask-image:radial-gradient(ellipse 82% 72% at 44% 50%,#000 48%,rgba(0,0,0,0) 88%);
+    transform:scale(1.02);
+  }
 
-body {
-  font-family: var(--md-font);
-  background: var(--md-surface);
-  color: var(--md-on-surface);
-  line-height: 1.7;
-  -webkit-font-smoothing: antialiased;
-  /* 动态背景渐变（跟随主题色轮换） */
-  background-image:
-    radial-gradient(1000px 600px at 15% -5%, var(--bg-g1) 0%, transparent 55%),
-    radial-gradient(800px 500px at 100% 25%, var(--bg-g2) 0%, transparent 50%),
-    radial-gradient(700px 500px at 5% 80%, var(--bg-g3) 0%, transparent 50%),
-    radial-gradient(600px 400px at 90% 95%, var(--bg-g4) 0%, transparent 45%);
-  background-attachment: fixed;
-  transition: background-image 1.2s var(--md-ease);
-}
+  /* ---------- 结尾 ---------- */
+  .s-end{justify-content:center;text-align:left}
+  .s-end h2{
+    font-size:clamp(46px,7.6vw,124px);line-height:1;font-weight:440;letter-spacing:-.035em;
+  }
+  .s-end h2 .dim{color:var(--faint)}
+  .s-end .row{margin-top:7vh;display:flex;justify-content:space-between;align-items:flex-end;gap:40px;flex-wrap:wrap}
+  .s-end p{font-size:15px;line-height:1.9;color:var(--soft)}
+  .s-end a{
+    font-size:clamp(18px,2.2vw,30px);color:var(--ink);text-decoration:none;
+    letter-spacing:-.01em;border-bottom:1px solid rgba(10,10,18,.28);
+    padding-bottom:6px;transition:border-color .3s,color .3s;
+  }
+  .s-end a:hover{color:#7A5CFF;border-color:#7A5CFF}
+  .foot-mark{
+    position:absolute;left:6vw;right:6vw;bottom:4vh;
+    display:flex;justify-content:space-between;
+    font-size:11px;letter-spacing:.2em;color:var(--faint);
+  }
 
-a { color: var(--md-primary); text-decoration: none; }
-img { max-width: 100%; display: block; }
+  /* ---------- 入场 ---------- */
+  .up{opacity:0;transform:translateY(34px);
+    transition:opacity 1.05s cubic-bezier(.16,.84,.28,1),transform 1.05s cubic-bezier(.16,.84,.28,1)}
+  .up.in{opacity:1;transform:none}
 
-/* Material Symbols */
-.ms {
-  font-family: "Material Symbols Rounded";
-  font-weight: normal; font-style: normal;
-  font-size: 24px; line-height: 1;
-  letter-spacing: normal; text-transform: none;
-  display: inline-block; white-space: nowrap;
-  word-wrap: normal; direction: ltr;
-  -webkit-font-feature-settings: "liga";
-  font-variation-settings: "FILL" 1, "wght" 500, "GRAD" 0, "opsz" 24;
-}
-
-/* ============ M3 顶栏 ============ */
-.top-app-bar {
-  position: sticky; top: 0; z-index: 100;
-  display: flex; align-items: center; gap: 16px;
-  padding: 10px 24px;
-  background: color-mix(in srgb, var(--md-surface) 82%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-bottom: 1px solid var(--md-outline-variant);
-}
-.tab-brand {
-  display: flex; align-items: center; gap: 12px;
-  font-weight: 700; font-size: 18px;
-  color: var(--md-on-surface);
-}
-.tab-brand .brand-mark {
-  width: 38px; height: 38px;
-  border-radius: 12px;
-  background: var(--md-primary);
-  color: var(--md-on-primary);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 16px; font-weight: 700;
-  font-family: var(--md-mono, monospace);
-}
-.tab-spacer { flex: 1; }
-.tab-link {
-  padding: 10px 18px;
-  border-radius: 999px;
-  font-size: 14px; font-weight: 500;
-  color: var(--md-on-surface-variant);
-  transition: background-color .15s;
-}
-.tab-link:hover { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
-.tab-link.action {
-  background: var(--md-primary); color: var(--md-on-primary);
-  font-weight: 600;
-}
-
-/* ============ Hero ============ */
-.hero {
-  min-height: 88vh;
-  display: flex; align-items: center; justify-content: center;
-  text-align: center;
-  padding: 48px 20px;
-}
-.hero-inner { max-width: 780px; }
-
-/* M3 Badge */
-.m3-badge {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 16px;
-  background: var(--md-secondary-container);
-  color: var(--md-on-secondary-container);
-  border-radius: 8px;
-  font-size: 13px; font-weight: 500;
-  margin-bottom: 28px;
-}
-.m3-badge .ms { font-size: 16px; }
-
-.hero h1 {
-  font-size: clamp(38px, 7vw, 62px);
-  font-weight: 700;
-  letter-spacing: -1.5px;
-  line-height: 1.12;
-  margin-bottom: 20px;
-  color: var(--md-on-surface);
-}
-.hero h1 .grad {
-  background: linear-gradient(120deg, var(--md-primary), color-mix(in srgb, var(--md-primary) 60%, #A78BFF));
-  -webkit-background-clip: text; background-clip: text;
-  -webkit-text-fill-color: transparent;
-  transition: background .8s var(--md-ease);
-}
-.hero p.sub {
-  font-size: clamp(16px, 2.4vw, 19px);
-  color: var(--md-on-surface-variant);
-  max-width: 580px; margin: 0 auto 40px;
-}
-
-/* M3 Buttons */
-.m3-btn {
-  display: inline-flex; align-items: center; gap: 8px;
-  height: 48px; padding: 0 28px;
-  border-radius: 999px;
-  font: inherit; font-size: 15px; font-weight: 600;
-  cursor: pointer;
-  transition: box-shadow .2s var(--md-ease), transform .1s, background-color .2s;
-  text-decoration: none !important;
-  position: relative;
-}
-.m3-btn:hover { box-shadow: var(--md-shadow-2); }
-.m3-btn:active { transform: scale(.97); }
-.m3-btn .ms { font-size: 20px; }
-.m3-btn.filled {
-  background: var(--md-primary); color: var(--md-on-primary);
-  box-shadow: var(--md-shadow-1);
-}
-.m3-btn.filled:hover { box-shadow: var(--md-shadow-3); }
-.m3-btn.tonal {
-  background: var(--md-secondary-container);
-  color: var(--md-on-secondary-container);
-}
-.m3-btn.outlined {
-  border: 1px solid var(--md-outline);
-  color: var(--md-primary); background: transparent;
-}
-.hero-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-
-/* M3 Assist chips */
-.hero-chips {
-  margin-top: 44px;
-  display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
-}
-.m3-chip {
-  display: inline-flex; align-items: center; gap: 8px;
-  height: 32px; padding: 0 14px;
-  border: 1px solid var(--md-outline-variant);
-  border-radius: 8px;
-  font-size: 13px; font-weight: 500;
-  color: var(--md-on-surface-variant);
-  background: transparent;
-}
-.m3-chip .ms { font-size: 18px; color: var(--md-primary); }
-.m3-chip b { color: var(--md-on-surface); }
-
-/* ============ Sections ============ */
-section { padding: 96px 24px; }
-.container { max-width: 1120px; margin: 0 auto; }
-.sec-title {
-  text-align: center;
-  font-size: clamp(28px, 4.5vw, 38px);
-  font-weight: 700;
-  letter-spacing: -0.5px;
-  margin-bottom: 12px;
-  color: var(--md-on-surface);
-}
-.sec-sub {
-  text-align: center; color: var(--md-on-surface-variant);
-  max-width: 560px; margin: 0 auto 56px; font-size: 15px;
-}
-
-/* M3 Cards */
-.m3-card {
-  background: var(--md-surface-container-low);
-  border-radius: 16px;
-  box-shadow: var(--md-shadow-1);
-  padding: 28px 24px;
-  transition: transform .2s var(--md-ease), box-shadow .2s, background-color .2s;
-}
-.m3-card:hover {
-  transform: translateY(-4px);
-  box-shadow: var(--md-shadow-2);
-  background: var(--md-surface-container);
-}
-.m3-card .card-icon {
-  width: 48px; height: 48px;
-  border-radius: 14px;
-  background: var(--md-primary-container);
-  color: var(--md-on-primary-container);
-  display: flex; align-items: center; justify-content: center;
-  margin-bottom: 16px;
-}
-.m3-card h3 { font-size: 17px; font-weight: 600; margin-bottom: 8px; color: var(--md-on-surface); }
-.m3-card p { font-size: 13.5px; color: var(--md-on-surface-variant); }
-
-.features {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 16px;
-}
-
-/* ============ Screenshots（M3 Carousel 风格） ============ */
-.shots-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 20px;
-}
-.m3-shot {
-  border-radius: 20px;
-  overflow: hidden;
-  background: var(--md-surface-container-low);
-  box-shadow: var(--md-shadow-1);
-  transition: transform .25s var(--md-ease), box-shadow .25s;
-}
-.m3-shot:hover { transform: scale(1.03); box-shadow: var(--md-shadow-3); }
-.m3-shot img { width: 100%; height: auto; }
-.m3-shot .cap {
-  padding: 12px 16px;
-  font-size: 13px; font-weight: 500;
-  color: var(--md-on-surface-variant);
-  border-top: 1px solid var(--md-outline-variant);
-  display: flex; align-items: center; gap: 8px;
-}
-.m3-shot .cap .ms { font-size: 18px; color: var(--md-primary); }
-
-/* ============ M3 Filled Card 下载区 ============ */
-.download-box {
-  text-align: center;
-  background: var(--md-primary-container);
-  color: var(--md-on-primary-container);
-  border-radius: 28px;
-  padding: 56px 28px;
-}
-.download-box h2 { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
-.download-box p { margin-bottom: 28px; font-size: 15px; opacity: .85; }
-.download-box .dl-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-.download-box .m3-btn.on-container {
-  background: var(--md-on-primary-container); color: var(--md-primary-container);
-}
-.download-box .m3-btn.inverse {
-  background: var(--md-surface-lowest); color: var(--md-on-surface);
-}
-.download-box .dl-note { margin-top: 22px; font-size: 12.5px; opacity: .65; }
-
-/* 捐赠卡片 */
-.donate-box {
-  text-align: center;
-  background: var(--md-tertiary-container);
-  color: var(--md-on-tertiary-container);
-  border-radius: 28px;
-  padding: 48px 28px;
-}
-.donate-box h2 { font-size: 24px; font-weight: 700; margin-bottom: 10px; }
-.donate-box p { margin-bottom: 24px; font-size: 15px; opacity: .85; }
-.donate-box .m3-btn { background: var(--md-on-tertiary-container); color: var(--md-tertiary-container); }
-.donate-box .dl-note { margin-top: 18px; font-size: 12.5px; opacity: .65; }
-
-/* ============ M3 Footer ============ */
-footer {
-  border-top: 1px solid var(--md-outline-variant);
-  padding: 40px 24px;
-  text-align: center;
-  font-size: 13px;
-  color: var(--md-on-surface-variant);
-  background: var(--md-surface-container);
-}
-footer .links { display: flex; gap: 24px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
-footer .links a { color: var(--md-on-surface); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
-footer .links a:hover { color: var(--md-primary); }
-footer .links .ms { font-size: 18px; }
-
-@media (max-width: 640px) {
-  section { padding: 64px 16px; }
-  .top-app-bar { padding: 8px 16px; }
-  .tab-link { display: none; }
-  .tab-link.action { display: inline-flex; }
-}
+  @media (max-width:860px){
+    .screen{padding:8vh 7vw}
+    .s-cover{justify-content:center;gap:8vh}
+    .s-cover .foot{flex-direction:column;align-items:flex-start;gap:22px}
+    .s-cover .note{text-align:left;max-width:100%}
+    .s-feat{grid-template-columns:1fr;padding:8vh 0 10vh;gap:4vh}
+    .s-feat .copy,.s-feat.flip .copy{order:1;padding:0 7vw;max-width:none}
+    .s-feat .shot,.s-feat.flip .shot{order:2;height:56vh;width:100%;margin:0}
+    .s-feat .shot img{object-position:50% 52%;
+      -webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0%,#000 15%,#000 85%,rgba(0,0,0,0) 100%);
+      mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0%,#000 15%,#000 85%,rgba(0,0,0,0) 100%)}
+    .s-feat .idx{margin-bottom:3vh}
+    .s-end .row{flex-direction:column;align-items:flex-start;gap:24px}
+    .s-film video{height:62vh}
+    .film-meta{bottom:auto;top:8vh}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .sky i,.sky .p,.sky .band{animation:none}
+  }
 </style>
 </head>
 <body>
 
-<!-- M3 顶栏 -->
-<nav class="top-app-bar">
-  <div class="tab-brand">
-    <div class="brand-mark">MI</div>
-    MINova
-  </div>
-  <div class="tab-spacer"></div>
-  <a class="tab-link" href="#features">功能</a>
-  <a class="tab-link" href="#screenshots">预览</a>
-  <a class="tab-link" href="https://afdian.com/a/MINova">支持我们</a>
-  <a class="tab-link action" href="https://github.com/Mintllo/MINova/releases/latest">
-    <span class="ms" style="font-size:18px;">download</span> 下载
-  </a>
-</nav>
-
-<!-- Hero -->
-<div class="hero">
-  <div class="hero-inner">
-    <div class="m3-badge"><span class="ms">verified</span> 开源免费 · GPL-3.0 · 无广告无会员</div>
-    <h1>你的音乐，<span class="grad">应有尽有</span></h1>
-    <p class="sub">MINova 是一款免费的 Android 音乐聚合播放器。多平台音源、3D 唱片架歌单、逐字歌词、Material Design 3 设计——装上就能听，不需要登录任何账号。</p>
-    <div class="hero-btns">
-      <a class="m3-btn filled" href="https://github.com/Mintllo/MINova/releases/latest">
-        <span class="ms">download</span> 下载最新版
-      </a>
-      <a class="m3-btn tonal" href="https://github.com/Mintllo/MINova">
-        <span class="ms">code</span> GitHub 仓库
-      </a>
-    </div>
-    <div class="hero-chips">
-      <span class="m3-chip"><span class="ms">library_music</span> <b>6+</b> 音源平台</span>
-      <span class="m3-chip"><span class="ms">album</span> <b>3D</b> 唱片架</span>
-      <span class="m3-chip"><span class="ms">block</span> <b>0</b> 广告</span>
-      <span class="m3-chip"><span class="ms">favorite</span> <b>100%</b> 免费</span>
-    </div>
-  </div>
+<div class="sky">
+  <i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i>
+  <div class="band"></div>
+  <div class="p p1"></div><div class="p p2"></div><div class="p p3"></div>
+  <div class="p p4"></div><div class="p p5"></div>
 </div>
 
-<!-- Features -->
-<section id="features">
-  <div class="container">
-    <h2 class="sec-title">功能一览</h2>
-    <p class="sec-sub">不只是能听歌——每一项功能都为体验而设计</p>
-    <div class="features">
-      <div class="m3-card"><div class="card-icon"><span class="ms">library_music</span></div><h3>多平台音源聚合</h3><p>酷我 / 咪咕 / B站 / 网易云 / QQ音乐 / 酷狗，一首歌自动匹配最佳音源，VIP 歌、DJ 版大幅提升可播率。</p></div>
-      <div class="m3-card"><div class="card-icon"><span class="ms">album</span></div><h3>全新 3D 唱片架</h3><p>堆叠 / 简洁两种浏览模式，支持抽出唱片 360 度细细观摩，你的歌单从此有仪式感。</p></div>
-      <div class="m3-card"><div class="card-icon"><span class="ms">mic</span></div><h3>逐字歌词</h3><p>LRC 解析支持逐字时间戳（卡拉OK式）与翻译行，滚动顺滑，悬浮歌词可锁定可拖拽。</p></div>
-      <div class="m3-card"><div class="card-icon"><span class="ms">cloud_sync</span></div><h3>歌单导入与云同步</h3><p>从各平台导入你的歌单，登录后自动云端同步——卸载重装、换设备，收藏一个不丢。</p></div>
-      <div class="m3-card"><div class="card-icon"><span class="ms">auto_awesome</span></div><h3>液态玻璃设计</h3><p>Material 3 Expressive + 液态玻璃双风格，真磨砂质感、按压果冻反馈、封面取色 C++ 加速。</p></div>
-      <div class="m3-card"><div class="card-icon"><span class="ms">download</span></div><h3>下载到本地</h3><p>支持断点续传与多通道加速，下载的歌离线也能听，登录后不怕丢。</p></div>
-      <div class="m3-card"><div class="card-icon"><span class="ms">psychology</span></div><h3>推荐更懂你</h3><p>听过的歌悄悄影响后续推荐，每日 30 首稳定更新，越用越合口味。</p></div>
-      <div class="m3-card"><div class="card-icon"><span class="ms">block</span></div><h3>零广告零会员</h3><p>没有开屏广告、没有算法推荐、没有会员体系。服务器费用靠用户自愿捐赠。</p></div>
-    </div>
-  </div>
-</section>
+<main class="page">
 
-<!-- Screenshots -->
-<section id="screenshots" style="background: var(--md-surface-container);">
-  <div class="container">
-    <h2 class="sec-title">应用预览</h2>
-    <p class="sec-sub">真实界面截图，所见即所得</p>
-    <div class="shots-grid">
-      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_全新3D歌单.png" alt="全新3D歌单" loading="lazy"><div class="cap"><span class="ms">album</span> 全新 3D 歌单 · 堆叠式唱片架</div></div>
-      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/03_3D歌单_来源Current.png" alt="3D歌单来源" loading="lazy"><div class="cap"><span class="ms">source</span> 歌单来源 · 多平台导入</div></div>
-      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/04_全屏音乐播放页.png" alt="全屏播放页" loading="lazy"><div class="cap"><span class="ms">music_note</span> 全屏播放页 · 封面取色</div></div>
-      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/05_推荐与每日30首.png" alt="推荐与每日30首" loading="lazy"><div class="cap"><span class="ms">explore</span> 推荐 · 每日 30 首</div></div>
-      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/06_听歌足迹.png" alt="听歌足迹" loading="lazy"><div class="cap"><span class="ms">timeline</span> 听歌足迹 · 本地统计</div></div>
-      <div class="m3-shot"><img src="https://raw.githubusercontent.com/Mintllo/MINova/main/preview/02_双风格.png" alt="双风格" loading="lazy"><div class="cap"><span class="ms">style</span> 液态玻璃 / Material 3 双风格</div></div>
+  <!-- 封面 -->
+  <section class="screen s-cover">
+    <div class="top">
+      <div class="brand">MINova</div>
+      <em>2026 / 11 / 25</em>
     </div>
-  </div>
-</section>
 
-<!-- Download -->
-<section>
-  <div class="container">
-    <div class="download-box">
-      <h2>立即下载</h2>
-      <p>支持 Android 8.0+ · arm64-v8a · 约 34 MB</p>
-      <div class="dl-btns">
-        <a class="m3-btn on-container" href="https://github.com/Mintllo/MINova/releases/latest">
-          <span class="ms">open_in_new</span> GitHub Releases
-        </a>
-        <a class="m3-btn inverse" href="https://github.com/Mintllo/MINova/releases/latest/download/MINova_1.3.5_release.apk">
-          <span class="ms">download</span> 直接下载 APK
-        </a>
-      </div>
-      <div class="dl-note">应用内更新：我的 → 设置 → 检查更新 · 旧版本更新会自动走加速通道</div>
+    <h1 class="up">
+      <span>11月25</span>
+      <span class="accent">更新预览</span>
+    </h1>
+
+    <div class="foot">
+      <div class="scroll up">SCROLL</div>
+      <p class="note up">本次有重大更新，<b>bug 较多</b>。<br>后续会跟进修复。</p>
     </div>
-  </div>
-</section>
+  </section>
 
-<!-- Donate -->
-<section style="padding-top: 0;">
-  <div class="container">
-    <div class="donate-box">
-      <h2><span class="ms" style="vertical-align:-4px;">favorite</span> 支持我们</h2>
-      <p>如果觉得好用的话，不妨来捐赠一下——服务器每个月都需要一点费用来维持运转，每一笔都会用于服务器。</p>
-      <a class="m3-btn" href="https://afdian.com/a/MINova">
-        <span class="ms">volunteer_activism</span> 前往爱发电
-      </a>
-      <div class="dl-note">不管捐不捐，MINova 永远免费、永远没有广告。</div>
+  <!-- 影片 -->
+  <section class="screen s-film">
+    <video id="v" src="video/MINova_promo_2026-11-25.mp4"
+      autoplay muted loop playsinline preload="auto"></video>
+    <div class="film-meta"><span>UPDATE PREVIEW · 2026.11.25</span><span>1920 × 1080 / 69s</span></div>
+  </section>
+
+  <!-- 01 -->
+  <section class="screen s-feat">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">01</span>
+      <h2 class="up">全新<br>3D 歌单</h2>
+      <p class="up">动态取色，可单张抽出观摩。此页面来源项目 Current，在此基础上进行升级、更改、优化体验。</p>
     </div>
-  </div>
-</section>
+    <figure class="shot"><img src="stills/feat-3d.png" alt="全新 3D 歌单"></figure>
+  </section>
 
-<footer>
-  <div class="links">
-    <a href="https://github.com/Mintllo/MINova"><span class="ms">code</span> GitHub</a>
-    <a href="https://github.com/Mintllo/MINova/releases"><span class="ms">history</span> 更新日志</a>
-    <a href="https://afdian.com/a/MINova"><span class="ms">volunteer_activism</span> 爱发电</a>
-    <a href="https://github.com/Mintllo/MINova/blob/main/LICENSE"><span class="ms">gavel</span> GPL-3.0 协议</a>
-  </div>
-  <div>© 2026 MINova Team · 用心做音乐播放器</div>
-</footer>
+  <!-- 02 -->
+  <section class="screen s-feat flip">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">02</span>
+      <h2 class="up">全屏音乐<br>播放页面</h2>
+      <p class="up">封面铺满整屏，歌词逐字高亮。</p>
+    </div>
+    <figure class="shot"><img src="stills/feat-player.png" alt="全新全屏音乐播放页面"></figure>
+  </section>
+
+  <!-- 03 -->
+  <section class="screen s-feat">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">03</span>
+      <h2 class="up">推荐与<br>每日 30 首</h2>
+      <p class="up">全新的推荐卡片，每天三十首，按心情挑。</p>
+    </div>
+    <figure class="shot"><img src="stills/feat-daily.png" alt="全新推荐与每日 30 首卡片"></figure>
+  </section>
+
+  <!-- 04 -->
+  <section class="screen s-feat flip">
+    <div class="rule"></div>
+    <div class="copy">
+      <span class="idx up">04</span>
+      <h2 class="up">听歌<br>足迹</h2>
+      <p class="up">今日时长、最爱歌手、时段分布，一页看完。</p>
+    </div>
+    <figure class="shot"><img src="stills/feat-footprint.png" alt="新增听歌足迹"></figure>
+  </section>
+
+  <!-- 结尾 -->
+  <section class="screen s-end">
+    <div class="rule"></div>
+    <h2 class="up">这只是一部分<br><span class="dim">已在 GitHub 开源</span></h2>
+    <div class="row">
+      <p class="up">Release 页可直接下载。<br>轻量、开源、云端同步。</p>
+      <a class="up" href="https://github.com/Mintllo/MINova" target="_blank" rel="noopener">github.com/Mintllo/MINova</a>
+    </div>
+    <div class="foot-mark"><span>MINOVA</span><span>2026.11</span></div>
+  </section>
+
+</main>
 
 <script>
-/* ============================================================
-   MD3 动态取色 — 5 组主题色轮换（蓝→紫→青→粉→绿）
-   通过 CSS 变量实现，每 8 秒平滑过渡一次
-   同时更新背景渐变色和 primary 系列
-   ============================================================ */
-const themes = [
-  { /* 蓝（默认） */
-    primary: "#4C6FFF", onPrimary: "#FFFFFF",
-    primaryContainer: "#DEE4FF", onPrimaryContainer: "#001159",
-    g1: "rgba(76, 111, 255, 0.14)", g2: "rgba(139, 92, 246, 0.10)",
-    g3: "rgba(14, 165, 233, 0.12)", g4: "rgba(236, 72, 153, 0.08)",
-  },
-  { /* 紫 */
-    primary: "#7C5FFF", onPrimary: "#FFFFFF",
-    primaryContainer: "#E6DEFF", onPrimaryContainer: "#220059",
-    g1: "rgba(139, 92, 246, 0.14)", g2: "rgba(76, 111, 255, 0.10)",
-    g3: "rgba(236, 72, 153, 0.10)", g4: "rgba(14, 165, 233, 0.08)",
-  },
-  { /* 青 */
-    primary: "#0EA5E9", onPrimary: "#FFFFFF",
-    primaryContainer: "#D3EEFF", onPrimaryContainer: "#001E31",
-    g1: "rgba(14, 165, 233, 0.14)", g2: "rgba(34, 197, 94, 0.10)",
-    g3: "rgba(76, 111, 255, 0.10)", g4: "rgba(139, 92, 246, 0.08)",
-  },
-  { /* 粉 */
-    primary: "#EC4899", onPrimary: "#FFFFFF",
-    primaryContainer: "#FFD8E9", onPrimaryContainer: "#2C1129",
-    g1: "rgba(236, 72, 153, 0.12)", g2: "rgba(124, 95, 255, 0.10)",
-    g3: "rgba(255, 100, 100, 0.08)", g4: "rgba(14, 165, 233, 0.08)",
-  },
-  { /* 绿 */
-    primary: "#16A34A", onPrimary: "#FFFFFF",
-    primaryContainer: "#B6F2C0", onPrimaryContainer: "#003912",
-    g1: "rgba(34, 197, 94, 0.12)", g2: "rgba(14, 165, 233, 0.10)",
-    g3: "rgba(76, 111, 255, 0.08)", g4: "rgba(236, 72, 153, 0.06)",
-  },
-];
+(() => {
+  const v = document.getElementById('v');
 
-let current = 0;
-function applyTheme(idx) {
-  const th = themes[idx];
-  const root = document.documentElement.style;
-  root.setProperty("--md-primary", th.primary);
-  root.setProperty("--md-on-primary", th.onPrimary);
-  root.setProperty("--md-primary-container", th.primaryContainer);
-  root.setProperty("--md-on-primary-container", th.onPrimaryContainer);
-  root.setProperty("--bg-g1", th.g1);
-  root.setProperty("--bg-g2", th.g2);
-  root.setProperty("--bg-g3", th.g3);
-  root.setProperty("--bg-g4", th.g4);
-}
+  v.addEventListener('click', () => { v.paused ? v.play() : v.pause(); });
+  v.play().catch(() => {});
 
-// 首次加载应用主题 0
-applyTheme(0);
+  const io = new IntersectionObserver((es) => {
+    es.forEach((e) => {
+      if (!e.isIntersecting) return;
+      e.target.classList.add('in');
+      io.unobserve(e.target);
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -2% 0px' });
+  document.querySelectorAll('.up').forEach((n, i) => {
+    n.style.transitionDelay = (i % 4) * 90 + 'ms';
+    io.observe(n);
+  });
 
-// 每 8 秒轮换到下一主题
-setInterval(() => {
-  current = (current + 1) % themes.length;
-  applyTheme(current);
-}, 8000);
-
-// 用户滚动时暂缓轮换（避免阅读时颜色跳变）
-let scrollTimer = null;
-window.addEventListener("scroll", () => {
-  clearTimeout(scrollTimer);
-  scrollTimer = setTimeout(() => {}, 3000);
-});
+  const vio = new IntersectionObserver((es) => {
+    es.forEach((e) => {
+      if (e.isIntersecting) v.play().catch(() => {});
+      else v.pause();
+    });
+  }, { threshold: 0.25 });
+  vio.observe(v);
+})();
 </script>
-
 </body>
 </html>
