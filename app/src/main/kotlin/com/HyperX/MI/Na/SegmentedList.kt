@@ -59,7 +59,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.highlight.Highlight
 
 private val SegmentedOuterRadius = 16.dp
 private val SegmentedInnerRadius = 4.dp
@@ -99,7 +102,7 @@ fun SegmentedColumn(
             )
         }
                         CompositionLocalProvider(LocalSegmentedRowGap provides SegmentedGap) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 content()
             }
         }
@@ -108,6 +111,7 @@ fun SegmentedColumn(
 
 @Composable
 private fun SegmentedRow(
+    backdrop: com.kyant.backdrop.Backdrop? = null,
     index: Int,
     count: Int,
     icon: ImageVector?,
@@ -117,28 +121,26 @@ private fun SegmentedRow(
     enabled: Boolean = true,
     trailing: @Composable () -> Unit,
 ) {
-    // 液态模式（LocalMd3Backdrop 非空）：卡片本体真磨砂（backdrop blur + 半透明着色）
-    val glass = LocalMd3Backdrop.current
-    val container = if (glass == null) MaterialTheme.colorScheme.surfaceBright else Color.Transparent
+    // 液态模式：有 backdrop 就用真磨砂玻璃（同 ProfileGlassCard）
+    val hasBackdrop = backdrop != null
+    val container = if (hasBackdrop) Color.Transparent else MaterialTheme.colorScheme.surfaceBright
     val colors = ListItemDefaults.segmentedColors(
         containerColor = container,
         disabledContainerColor = container,
         supportingContentColor = MaterialTheme.colorScheme.onSurfaceVariant
     )
-    val shapes = ListItemDefaults.segmentedShapes(index = index, count = count)
-    val glassShape = RoundedCornerShape(
-        topStart = if (index == 0) 16.dp else 4.dp,
-        topEnd = if (index == 0) 16.dp else 4.dp,
-        bottomEnd = if (index == count - 1) 16.dp else 4.dp,
-        bottomStart = if (index == count - 1) 16.dp else 4.dp
-    )
-    val glassFrost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.22f)
-    val glassModifier = if (glass != null) Modifier.drawBackdrop(
-        backdrop = glass,
-        shape = { glassShape },
-        effects = { blur(10f.dp.toPx()) },
-        highlight = { com.kyant.backdrop.highlight.Highlight.Plain.copy(alpha = 0f) },
-        onDrawSurface = { drawRect(glassFrost) }
+    val shapes = if (hasBackdrop) ListItemDefaults.segmentedShapes(
+        index = 0, count = 1
+    ) else ListItemDefaults.segmentedShapes(index = index, count = count)
+    val glassModifier = if (backdrop != null) Modifier.drawBackdrop(
+        backdrop = backdrop,
+        shape = { RoundedCornerShape(16.dp) },
+        effects = {
+            vibrancy()
+            blur(8f.dp.toPx())
+            lens(16f.dp.toPx(), 32f.dp.toPx())
+        },
+        highlight = { com.kyant.backdrop.highlight.Highlight.Plain.copy(alpha = 0f) }
     ) else Modifier
     val noop: () -> Unit = {}
     val clickAction: () -> Unit = if (enabled) (onClick ?: noop) else noop
@@ -156,6 +158,7 @@ private fun SegmentedRow(
 
 @Composable
 fun SegmentedSwitchItem(
+    backdrop: com.kyant.backdrop.Backdrop? = null,
     index: Int,
     count: Int,
     icon: ImageVector? = null,
@@ -167,6 +170,7 @@ fun SegmentedSwitchItem(
 ) {
     val haptic = LocalHapticFeedback.current
     SegmentedRow(
+        backdrop = backdrop,
         index = index, count = count, icon = icon, title = title, summary = summary,
         enabled = enabled,
         onClick = {
@@ -184,6 +188,7 @@ fun SegmentedSwitchItem(
 
 @Composable
 fun SegmentedNavItem(
+    backdrop: com.kyant.backdrop.Backdrop? = null,
     index: Int,
     count: Int,
     icon: ImageVector? = null,
@@ -193,6 +198,7 @@ fun SegmentedNavItem(
     trailing: (@Composable () -> Unit)? = null,
 ) {
     SegmentedRow(
+        backdrop = backdrop,
         index = index, count = count, icon = icon, title = title, summary = summary,
         onClick = onClick
     ) {

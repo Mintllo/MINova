@@ -1602,7 +1602,7 @@ class FloatingLyricsService : Service() {
         /** 已存活的 Service 实例：applyNow 直接驱动它刷新，不依赖 startService 能否送达。 */
         @Volatile
         private var instance: FloatingLyricsService? = null
-        private const val NOTIF_ID = 8801
+        private const val NOTIF_ID = 8802
         private const val PANEL_WIDTH_DP = 306
         private const val PANEL_EST_HEIGHT_DP = 560
 

@@ -13,7 +13,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.draw.clip
 
-
 import android.app.Application
 import android.content.Context
 import android.content.Intent
@@ -2570,6 +2569,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 ctx, 0, openIntent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
+            val isCurrentFavorite = runCatching { _favorites.value.any { it.id == song.id } }.getOrDefault(false)
             // 加载封面（同步 ✓ 小图 128px 够用 ✓）
             val coverBmp = try {
                 if (song.picUrl.isNotBlank()) {
@@ -2581,7 +2581,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             } catch (_: Exception) { null }
             val token = if (::mediaSession.isInitialized) mediaSession.sessionToken else null
             val b = androidx.core.app.NotificationCompat.Builder(ctx, ensureNotifChannel())
-                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setSmallIcon(R.drawable.ic_notif_play)
                 .setContentTitle(song.name)
                 .setContentText(song.artist.ifBlank { "MINova" })
                 .setSubText(song.album.ifBlank { null })
@@ -2598,13 +2598,23 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     .setMediaSession(token)
                     .setShowActionsInCompactView(0, 1, 2))
             }
-            b.addAction(android.R.drawable.ic_media_previous, "上一首", notifAction(ctx, 1, MusicNotificationService.ACTION_PREV))
+            b.addAction(R.drawable.ic_notif_previous, "上一首", notifAction(ctx, 1, MusicNotificationService.ACTION_PREV))
             b.addAction(
-                if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (playing) R.drawable.ic_notif_pause else R.drawable.ic_notif_play,
                 if (playing) "暂停" else "播放",
                 notifAction(ctx, 2, MusicNotificationService.ACTION_TOGGLE)
             )
-            b.addAction(android.R.drawable.ic_media_next, "下一首", notifAction(ctx, 3, MusicNotificationService.ACTION_NEXT))
+            b.addAction(R.drawable.ic_notif_next, "下一首", notifAction(ctx, 3, MusicNotificationService.ACTION_NEXT))
+            b.addAction(
+                if (isCurrentFavorite) R.drawable.ic_notif_favorite else R.drawable.ic_notif_favorite_border,
+                if (isCurrentFavorite) "取消收藏" else "收藏",
+                notifAction(ctx, 4, MusicNotificationService.ACTION_FAVORITE)
+            )
+            b.addAction(
+                if (FloatingLyricsPrefs.isLocked(ctx)) R.drawable.ic_notif_unlock else R.drawable.ic_notif_lock,
+                if (FloatingLyricsPrefs.isLocked(ctx)) "解锁歌词" else "锁定歌词",
+                notifAction(ctx, 5, MusicNotificationService.ACTION_TOGGLE_LYRICS_LOCK)
+            )
             val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
             mgr.notify(8802, b.build())
         } catch (_: Exception) { }
@@ -3031,6 +3041,20 @@ private fun addPlayHistory(song: Song) {
         PlayerControlBridge.onPrev = { playPrevious() }
         PlayerControlBridge.onNext = { playNext() }
         PlayerControlBridge.onToggle = { togglePlayPause() }
+
+        PlayerControlBridge.onFavorite = { viewModelScope.launch(Dispatchers.IO) {
+            val song = lastNotifSong ?: return@launch
+            runCatching {
+                if (_favorites.value.any { it.id == song.id }) removeFromFavorites(song.id) else addToFavorites(song)
+            }
+        } }
+        PlayerControlBridge.onToggleLyricsLock = {
+            val ctx = App.instance
+            val newLocked = !FloatingLyricsPrefs.isLocked(ctx)
+            FloatingLyricsPrefs.setLocked(ctx, newLocked)
+            // 刷新通知以更新图标
+            lastNotifSong?.let { postMediaNotification(it, true) }
+        }
         mediaSession = MediaSessionCompat(application, "MusicPlayer"); mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS); mediaSession.setPlaybackState(pb.build())
         mediaSession.setCallback(object : MediaSessionCompat.Callback() { override fun onPlay() { togglePlayPause() }; override fun onPause() { togglePlayPause() }; override fun onSkipToNext() { playNext() }; override fun onSkipToPrevious() { playPrevious() }; override fun onSeekTo(pos: Long) { seekTo(pos) } })
         authToken = loadTokenFromFile()
@@ -4350,10 +4374,16 @@ fun MusicSearchTab(
                                 Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(32.dp))
                             // 新液态（对齐排序芯片）：半透明白 .14 面 + 白 .26 细描边，去 kyant 老液态管线
                             else Modifier.run {
-                                val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
-                                drawBackdrop(backdrop, shape = { RoundedCornerShape(32.dp) },
-                                    effects = { blur(18f.dp.toPx()) },
-                                    onDrawSurface = { drawRect(frost) })
+                                drawBackdrop(
+                                    backdrop = backdrop,
+                                    shape = { RoundedCornerShape(32.dp) },
+                                    effects = {
+                                        vibrancy()
+                                        blur(18f.dp.toPx())
+                                        lens(16f.dp.toPx(), 32f.dp.toPx())
+                                    },
+                                    highlight = { com.kyant.backdrop.highlight.Highlight.Default.copy(alpha = 0.5f) }
+                                )
                             }
                         )
                         .fillMaxWidth()
@@ -4521,12 +4551,16 @@ fun MusicSearchTab(
                         if (LocalMd3Style.current)
                             Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedCornerShape(searchCornerRadius))
                         // 液态搜索框：统一 0.60 主题磨砂，避免聚焦后泛白
-                        else Modifier.run {
-                            val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
-                            drawBackdrop(backdrop, shape = { RoundedCornerShape(searchCornerRadius) },
-                                effects = { blur(14f.dp.toPx()) },
-                                onDrawSurface = { drawRect(frost) })
-                        }
+                        else Modifier.drawBackdrop(
+                            backdrop = backdrop,
+                            shape = { RoundedCornerShape(searchCornerRadius) },
+                            effects = {
+                                vibrancy()
+                                blur(8f.dp.toPx())
+                                lens(16f.dp.toPx(), 32f.dp.toPx())
+                            },
+                            highlight = { com.kyant.backdrop.highlight.Highlight.Default.copy(alpha = 0.5f) }
+                        )
                     )
                     .clip(RoundedCornerShape(searchCornerRadius))
             ) {
@@ -4877,7 +4911,6 @@ fun SearchLiquidButton(
     val interactionSource = remember { MutableInteractionSource() }
     val pressS = com.HyperX.MI.Na.nativeui.rememberElasticPressState()
     val jellyS = remember { Animatable(1f) }
-    val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
     val ink = MaterialTheme.colorScheme.onSurface
     LaunchedEffect(pressS) {
         snapshotFlow { pressS.amount > .45f }.distinctUntilChanged().collect { down ->
@@ -4911,8 +4944,12 @@ fun SearchLiquidButton(
                 }
                 .clip(shape)
                 .drawBackdrop(backdrop, shape = { shape },
-                    effects = { blur(12f.dp.toPx()) },
-                    onDrawSurface = { drawRect(frost) })
+                    effects = {
+                        vibrancy()
+                        blur(8f.dp.toPx())
+                        lens(16f.dp.toPx(), 32f.dp.toPx())
+                    },
+                    highlight = { com.kyant.backdrop.highlight.Highlight.Default.copy(alpha = 0.5f) })
                 .drawBehind { if (pressS.amount > 0f) drawRect(ink.copy(alpha = .06f * pressS.amount.coerceIn(0f, 1f))) }
                 .padding(horizontal = 22.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -5060,7 +5097,7 @@ fun SettingsThemeTab(
                     surfaceContainerHigh = MaterialTheme.colorScheme.surfaceContainerHigh,
                     surfaceContainerHighest = MaterialTheme.colorScheme.surfaceContainerHighest,
                     // 组件本身液态：每行表面直接是半透明磨砂玻璃色，无外层容器
-                    surfaceBright = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f),
+                    surfaceBright = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.40f),
                     surfaceDim = MaterialTheme.colorScheme.surfaceDim
                 )
                 CompositionLocalProvider(LocalMd3Backdrop provides backdrop) {
@@ -5073,6 +5110,7 @@ fun SettingsThemeTab(
                             SegColumn {
                     val rememberLastOn by viewModel.rememberLast.collectAsState()
                     SegClick(
+                            backdrop = backdrop,
                         index = 0, count = 9,
                         icon = Icons.Outlined.Image,
                         title = "主题与个性化",
@@ -5080,6 +5118,7 @@ fun SettingsThemeTab(
                         onClick = onNavigateToCustomCenter
                     )
                     SegClick(
+                            backdrop = backdrop,
                         index = 1, count = 9,
                         icon = Icons.Rounded.Palette,
                         title = "主题与颜色",
@@ -5087,6 +5126,7 @@ fun SettingsThemeTab(
                         onClick = onNavigateToColorPalette
                     )
                     SegSwitch(
+                            backdrop = backdrop,
                         index = 2, count = 9,
                         icon = if (viewModel.isForceDarkMode) Icons.Rounded.DarkMode else Icons.Rounded.LightMode,
                         title = "暗色模式",
@@ -5098,6 +5138,7 @@ fun SettingsThemeTab(
                         }
                     )
                 SegSwitch(
+                            backdrop = backdrop,
                             index = 3, count = 9,
                             icon = Icons.Rounded.FormatColorText,
                             title = "文字变白",
@@ -5109,6 +5150,7 @@ fun SettingsThemeTab(
                             }
                         )
                     SegClick(
+                            backdrop = backdrop,
                         index = 4, count = 9,
                         icon = Icons.Rounded.Lyrics,
                         title = "悬浮歌词（测试版）",
@@ -5120,6 +5162,7 @@ fun SettingsThemeTab(
                     }
 
                     SegSwitch(
+                            backdrop = backdrop,
                         index = 5, count = 9,
                         icon = Icons.Rounded.MusicNote,
                         title = "波浪进度条",
@@ -5131,6 +5174,7 @@ fun SettingsThemeTab(
                         }
                     )
                     SegClick(
+                            backdrop = backdrop,
                         index = 6, count = 9,
                         icon = Icons.Rounded.Equalizer,
                         title = "音乐偏好",
@@ -5139,6 +5183,7 @@ fun SettingsThemeTab(
                     )
                     // 与「暗色模式」同样的卡片样式
                     SegSwitch(
+                            backdrop = backdrop,
                         index = 7, count = 9,
                         icon = Icons.Rounded.Restore,
                         title = "记住上次播放",
@@ -5147,6 +5192,7 @@ fun SettingsThemeTab(
                         onCheckedChange = { on -> viewModel.setRememberLast(ctx, on) }
                     )
                     SegClick(
+                            backdrop = backdrop,
                         index = 8, count = 9,
                         icon = Icons.Rounded.Equalizer,
                         title = "音质切换",
@@ -6322,12 +6368,16 @@ private fun SettingsGlassCard(
                 if (LocalMd3Style.current || solid)
                     Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedRectangle(16f.dp))
                 // 新液态（对齐排序芯片）：半透明白 .14 面 + 白 .26 细描边，去 kyant 老液态管线
-                else Modifier.run {
-                    val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
-                    drawBackdrop(backdrop, shape = { RoundedRectangle(16f.dp) },
-                        effects = { blur(14f.dp.toPx()) },
-                        onDrawSurface = { drawRect(frost) })
-                }
+                else Modifier.drawBackdrop(
+                    backdrop = backdrop,
+                    shape = { RoundedRectangle(16f.dp) },
+                    effects = {
+                        vibrancy()
+                        blur(14f.dp.toPx())
+                        lens(16f.dp.toPx(), 32f.dp.toPx())
+                    },
+                    highlight = { com.kyant.backdrop.highlight.Highlight.Default.copy(alpha = 0.5f) }
+                )
                     
             )
             .clip(RoundedRectangle(16f.dp))
@@ -7395,12 +7445,16 @@ fun CollapsibleCard(
                 if (LocalMd3Style.current)
                     Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedRectangle(24f.dp))
                 // 新液态（对齐排序芯片）：半透明白 .14 面 + 白 .26 细描边，去 kyant 老液态管线
-                else Modifier.run {
-                    val frost = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f)
-                    drawBackdrop(backdrop, shape = { RoundedRectangle(24f.dp) },
-                        effects = { blur(16f.dp.toPx()) },
-                        onDrawSurface = { drawRect(frost) })
-                }
+                else Modifier.drawBackdrop(
+                    backdrop = backdrop,
+                    shape = { RoundedRectangle(24f.dp) },
+                    effects = {
+                        vibrancy()
+                        blur(16f.dp.toPx())
+                        lens(16f.dp.toPx(), 32f.dp.toPx())
+                    },
+                    highlight = { com.kyant.backdrop.highlight.Highlight.Default.copy(alpha = 0.5f) }
+                )
 
             )
             .clip(RoundedRectangle(24f.dp))
@@ -7684,7 +7738,6 @@ fun SongLongPressSheet(
             }
         }
 }
-
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -8846,8 +8899,6 @@ class MainActivity : ComponentActivity() {
 
         com.google.android.gms.ads.MobileAds.initialize(this)
 
-
-
         setContent {
     val viewModel: PlayerViewModel = viewModel()
         val ksColorMode = ColorMode.fromValue(viewModel.colorMode)
@@ -9034,7 +9085,6 @@ class MainActivity : ComponentActivity() {
                     onRememberLastChange = { on -> viewModel.setRememberLast(context, on) }
                 )
             }
-
 
             // 应用内气泡提示：不再用系统 Toast，文案与语义保持不变
             val toastMessage by viewModel.toastMessage.collectAsState()
@@ -9591,6 +9641,17 @@ data class ChangelogEntry(val version: String, val items: List<String>)
 
 /** 各版本改动要点（只写项目里真实存在 / 真实修过的内容）。 */
 private val CHANGELOG: List<ChangelogEntry> = listOf(
+    ChangelogEntry(
+        version = "1.3.6",
+        items = listOf(
+            "支持我们：账号页新增捐赠入口，关于页展示赞助者名单，你的支持直接用于服务器续费",
+            "通知栏全面升级：Material 3 图标与五项快捷操作（上/下一首、暂停、收藏、歌词锁定），不再出现第二条通知",
+            "推荐页体验修复：切歌时推荐列表不再跳动，浏览更安心",
+            "液态玻璃更深邃：设置页卡片与账号页同源通透质感，去除多余描边与间隙",
+            "播放失败自动换源更快：解析失败几乎无感切换下一可用音源"
+        )
+    ),
+
     ChangelogEntry(
         version = "1.3.5",
         items = listOf(

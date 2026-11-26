@@ -227,7 +227,7 @@ fun ColorPaletteScreen(
 
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 options.chunked(4).forEach { rowOptions ->
                     Row(
@@ -366,7 +366,8 @@ internal fun SegColumn(title: String = "", content: @Composable ColumnScope.() -
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = 16.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(0.dp)
     ) {
         if (title.isNotEmpty()) {
             Text(
@@ -432,6 +433,7 @@ internal fun SegRow(
 
 @Composable
 internal fun SegSwitch(
+    backdrop: com.kyant.backdrop.Backdrop? = null,
     index: Int,
     count: Int,
     icon: ImageVector,
@@ -441,7 +443,7 @@ internal fun SegSwitch(
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
-        SegmentedSwitchItem(
+        SegmentedSwitchItem(backdrop = backdrop, 
         index = index,
         count = count,
         icon = icon,
@@ -455,6 +457,7 @@ internal fun SegSwitch(
 
 @Composable
 internal fun SegClick(
+    backdrop: com.kyant.backdrop.Backdrop? = null,
     index: Int,
     count: Int,
     icon: ImageVector,
@@ -462,7 +465,7 @@ internal fun SegClick(
     summary: String?,
     onClick: () -> Unit,
 ) {
-        SegmentedNavItem(
+        SegmentedNavItem(backdrop = backdrop, 
         index = index,
         count = count,
         icon = icon,

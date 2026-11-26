@@ -12,10 +12,14 @@ object PlayerControlBridge {
     @Volatile var onPrev: (() -> Unit)? = null
     @Volatile var onNext: (() -> Unit)? = null
     @Volatile var onToggle: (() -> Unit)? = null
+    @Volatile var onFavorite: (() -> Unit)? = null
+    @Volatile var onToggleLyricsLock: (() -> Unit)? = null
 
     fun prev() = runCatching { onPrev?.invoke() }
     fun next() = runCatching { onNext?.invoke() }
     fun toggle() = runCatching { onToggle?.invoke() }
+    fun favorite() = runCatching { onFavorite?.invoke() }
+    fun toggleLyricsLock() = runCatching { onToggleLyricsLock?.invoke() }
 }
 
 /**
@@ -29,6 +33,8 @@ class MusicNotificationService : Service() {
             ACTION_PREV -> PlayerControlBridge.prev()
             ACTION_NEXT -> PlayerControlBridge.next()
             ACTION_TOGGLE -> PlayerControlBridge.toggle()
+            ACTION_FAVORITE -> PlayerControlBridge.favorite()
+            ACTION_TOGGLE_LYRICS_LOCK -> PlayerControlBridge.toggleLyricsLock()
         }
         stopSelf(startId)
         return START_NOT_STICKY
@@ -38,5 +44,7 @@ class MusicNotificationService : Service() {
         const val ACTION_PREV = "com.HyperX.MI.Na.MEDIA_PREV"
         const val ACTION_NEXT = "com.HyperX.MI.Na.MEDIA_NEXT"
         const val ACTION_TOGGLE = "com.HyperX.MI.Na.MEDIA_TOGGLE"
+        const val ACTION_FAVORITE = "com.HyperX.MI.Na.MEDIA_FAVORITE"
+        const val ACTION_TOGGLE_LYRICS_LOCK = "com.HyperX.MI.Na.MEDIA_LYRICS_LOCK"
     }
 }

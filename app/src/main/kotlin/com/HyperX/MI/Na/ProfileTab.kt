@@ -8,6 +8,8 @@ import androidx.compose.animation.shrinkVertically
 
 import android.app.Activity
 import android.content.Intent
+import java.net.URL
+import java.net.HttpURLConnection
 import android.net.Uri
 
 import androidx.activity.compose.BackHandler
@@ -86,6 +88,7 @@ import com.HyperX.MI.Na.stats.ListenStatsStore
 
 /** 本项目的开源仓库地址。 */
 private const val PROJECT_GITHUB_URL = "https://github.com/Mintllo/MINova"
+	private const val AFDIAN_URL = "https://afdian.com/a/MINova"
 
 /**
  * 用系统浏览器打开开源仓库。
@@ -227,18 +230,57 @@ fun UnloggedProfilePage(
                                 Icon(Icons.Rounded.OpenInNew, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                             }
                         }
-                        // 听歌足迹独立入口：本地统计未登录同样可用，直达足迹页
+                        item {
+                            val ctx = LocalContext.current
+                            ProfileGlassCard(backdrop = backdrop, onClick = {
+                                ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(AFDIAN_URL)))
+                            }) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Favorite,
+                                        null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "支持我们",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 15.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        "如果觉得好用的话，不妨来捐赠一下",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                            }
+                        }
                         item { FootprintEntryCard(backdrop = backdrop, onClick = { activePage = "footprint" }) }
                         if (isMd3Style) {
                                                         item {
-                                SegmentedColumn(title = "更多操作") {
-                                    SegmentedNavItem(index = 0, count = 7, icon = Icons.Rounded.Favorite, title = "我的收藏", summary = null, onClick = { onLoginClick() }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                                    SegmentedNavItem(index = 1, count = 7, icon = Icons.Rounded.History, title = "历史播放", summary = null, onClick = { onLoginClick() }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                                    SegmentedNavItem(index = 2, count = 7, icon = Icons.Rounded.QueueMusic, title = "歌单", summary = null, onClick = { activePage = "playlists" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                                    SegmentedNavItem(index = 3, count = 7, icon = Icons.Rounded.EventNote, title = "更新日志", summary = null, onClick = { activePage = "changelog" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                                    SegmentedNavItem(index = 4, count = 7, icon = Icons.Rounded.Info, title = "关于本应用", summary = null, onClick = { activePage = "about" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                                    SegmentedNavItem(index = 5, count = 7, icon = Icons.Rounded.Storage, title = "管理本地存储", summary = null, onClick = { activePage = "storage_manage" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                                    SegmentedNavItem(index = 6, count = 7, icon = Icons.Rounded.Feedback, title = "意见反馈", summary = null, onClick = { activePage = "feedback" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                                val context = LocalContext.current
+SegmentedColumn(title = "更多操作") {
+                                    SegmentedNavItem(index = 0, count = 8, icon = Icons.Rounded.Favorite, title = "我的收藏", summary = null, onClick = { onLoginClick() }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                                    SegmentedNavItem(index = 1, count = 8, icon = Icons.Rounded.History, title = "历史播放", summary = null, onClick = { onLoginClick() }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                                    SegmentedNavItem(index = 2, count = 8, icon = Icons.Rounded.QueueMusic, title = "歌单", summary = null, onClick = { activePage = "playlists" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                                    SegmentedNavItem(index = 3, count = 8, icon = Icons.Rounded.EventNote, title = "更新日志", summary = null, onClick = { activePage = "changelog" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                                    SegmentedNavItem(index = 4, count = 8, icon = Icons.Rounded.Favorite, title = "支持我们", summary = null, onClick = {
+                                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(AFDIAN_URL)))
+                                    })
+                                    SegmentedNavItem(index = 5, count = 8, icon = Icons.Rounded.Info, title = "关于本应用", summary = null, onClick = { activePage = "about" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                                    SegmentedNavItem(index = 6, count = 8, icon = Icons.Rounded.Storage, title = "管理本地存储", summary = null, onClick = { activePage = "storage_manage" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                                    SegmentedNavItem(index = 7, count = 8, icon = Icons.Rounded.Feedback, title = "意见反馈", summary = null, onClick = { activePage = "feedback" }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
                                 }
                             }
                         } else {
@@ -397,17 +439,53 @@ fun MainProfilePage(
                 }
             }
             // 听歌足迹独立入口：与收藏/歌单同级，不依赖歌单页（数据本地维护，未登录也可用）
+            item {
+                val ctx = LocalContext.current
+                ProfileGlassCard(backdrop = backdrop, onClick = {
+                    ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(AFDIAN_URL)))
+                }) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Rounded.Favorite,
+                            null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "支持我们",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            "如果觉得好用的话，不妨来捐赠一下",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                }
+            }
             item { FootprintEntryCard(backdrop = backdrop, onClick = { onNavigate("footprint") }) }
             if (isMd3Style) {
                                 item {
                     SegmentedColumn(title = "更多操作") {
-                        SegmentedNavItem(index = 0, count = 7, icon = Icons.Rounded.Favorite, title = "我的收藏", summary = null, onClick = { onNavigate("favorites") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                        SegmentedNavItem(index = 1, count = 7, icon = Icons.Rounded.History, title = "历史播放", summary = null, onClick = { onNavigate("history") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                        SegmentedNavItem(index = 2, count = 7, icon = Icons.Rounded.QueueMusic, title = "歌单", summary = null, onClick = { onNavigate("playlists") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                        SegmentedNavItem(index = 3, count = 7, icon = Icons.Rounded.EventNote, title = "更新日志", summary = null, onClick = { onNavigate("changelog") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                        SegmentedNavItem(index = 0, count = 8, icon = Icons.Rounded.Favorite, title = "我的收藏", summary = null, onClick = { onNavigate("favorites") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                        SegmentedNavItem(index = 1, count = 8, icon = Icons.Rounded.History, title = "历史播放", summary = null, onClick = { onNavigate("history") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                        SegmentedNavItem(index = 2, count = 8, icon = Icons.Rounded.QueueMusic, title = "歌单", summary = null, onClick = { onNavigate("playlists") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                        SegmentedNavItem(index = 3, count = 8, icon = Icons.Rounded.EventNote, title = "更新日志", summary = null, onClick = { onNavigate("changelog") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
                         SegmentedNavItem(index = 4, count = 7, icon = Icons.Rounded.Info, title = "关于本应用", summary = null, onClick = { onNavigate("about") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                        SegmentedNavItem(index = 5, count = 7, icon = Icons.Rounded.Storage, title = "管理本地存储", summary = null, onClick = { onNavigate("storage_manage") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
-                        SegmentedNavItem(index = 6, count = 7, icon = Icons.Rounded.Feedback, title = "意见反馈", summary = null, onClick = { onNavigate("feedback") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                        SegmentedNavItem(index = 6, count = 8, icon = Icons.Rounded.Storage, title = "管理本地存储", summary = null, onClick = { onNavigate("storage_manage") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
+                        SegmentedNavItem(index = 7, count = 8, icon = Icons.Rounded.Feedback, title = "意见反馈", summary = null, onClick = { onNavigate("feedback") }, trailing = { Icon(Icons.Rounded.ChevronRight, null) })
                     }
                 }
             } else {
@@ -420,7 +498,7 @@ fun MainProfilePage(
                         modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 6.dp, bottom = 2.dp)
                     )
                 }
-                item { ProfileMenuItemCard(Icons.Rounded.Favorite, "我的收藏", backdrop) { onNavigate("favorites") } }
+                                item { ProfileMenuItemCard(Icons.Rounded.Favorite, "我的收藏", backdrop) { onNavigate("favorites") } }
                 item { ProfileMenuItemCard(Icons.Rounded.History, "历史播放", backdrop) { onNavigate("history") } }
                 item { ProfileMenuItemCard(Icons.Rounded.QueueMusic, "歌单", backdrop) { onNavigate("playlists") } }
                                 item { ProfileMenuItemCard(Icons.Rounded.EventNote, "更新日志", backdrop) { onNavigate("changelog") } }
@@ -1415,6 +1493,64 @@ fun AboutScreen(backdrop: Backdrop, onBack: () -> Unit) {
                 DevCard("https://q1.qlogo.cn/g?b=qq&nk=1951078485&s=640&t=${System.currentTimeMillis()}", "五指拳心剑", "界面优化及功能意见") { openQQ(context, "1951078485") }
                 DevCard("https://q1.qlogo.cn/g?b=qq&nk=1322043642&s=640&t=${System.currentTimeMillis()}", "ㅤ", "长期支持") { openQQ(context, "1322043642") }
                 DevCard("", "deepseek", "", isAI = true, onClick = {})
+            }
+
+            // 赞助者名单
+            var sponsorNames by remember { mutableStateOf(listOf<Pair<String, Double>>()) }
+            LaunchedEffect(Unit) {
+                runCatching {
+                    val conn = URL("${PlayerViewModel.API_BASE_URL}/api/v1/sponsors").openConnection() as HttpURLConnection
+                    val body = conn.inputStream.bufferedReader().readText()
+                    val arr = org.json.JSONObject(body).optJSONArray("sponsors") ?: return@runCatching
+                    val list = mutableListOf<Pair<String, Double>>()
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        list.add(o.optString("name") to o.optDouble("amount"))
+                    }
+                    sponsorNames = list
+                }
+            }
+            if (sponsorNames.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.Favorite, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("感谢这些朋友", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (LocalMd3Style.current)
+                                Modifier.background(MaterialTheme.colorScheme.surfaceBright, RoundedRectangle(24f.dp))
+                            else Modifier.drawBackdrop(
+                                backdrop = backdrop,
+                                shape = { RoundedRectangle(24f.dp) },
+                                effects = {
+                                    vibrancy()
+                                    blur(10f.dp.toPx())
+                                    lens(16f.dp.toPx(), 32f.dp.toPx())
+                                },
+                                highlight = { Highlight.Default.copy(alpha = 0.5f) }
+                            )
+                        )
+                        .clip(RoundedRectangle(24f.dp))
+                        .padding(8.dp)
+                ) {
+                    sponsorNames.forEach { (name, amount) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Rounded.Favorite, null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Text(name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                            Text("¥%.0f".format(amount), fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
             }
 
             Column(
