@@ -86,12 +86,11 @@
     display:block;
     font-weight:640;
     background:linear-gradient(100deg,
-      #FF6B8A 0%, #C08BFF 18%, #6FA8FF 36%, #6BFFD9 52%,
-      #FFD96B 68%, #FF6B8A 84%, #FF6B8A 100%);
-    background-size:300% 100%;
+      #FF96AC 0%, #7CA6FF 24%, #BA92FF 48%, #FFC68A 70%, #FF96AC 92%, #FF96AC 100%);
+    background-size:260% 100%;
     -webkit-background-clip:text;background-clip:text;color:transparent;
-    animation:flow 7s linear infinite, float 5.2s ease-in-out infinite;
-    filter:drop-shadow(0 6px 28px rgba(140,120,255,.28));
+    animation:flow 7s linear infinite;
+    filter:drop-shadow(0 6px 28px rgba(124,166,255,.30));
   }
   .hero-title .line2{
     display:block;
@@ -100,41 +99,43 @@
       #7A5CFF 0%, #4189FF 30%, #38C6B4 55%, #9169FF 80%, #7A5CFF 100%);
     background-size:280% 100%;
     -webkit-background-clip:text;background-clip:text;color:transparent;
-    animation:flow 9s linear infinite reverse, float 5.2s ease-in-out infinite 1.2s;
+    animation:flow 9s linear infinite reverse 1.2s;
     letter-spacing:.14em;
   }
   @keyframes flow{
     0%{background-position:0% 50%}
     100%{background-position:300% 50%}
   }
-  @keyframes float{
-    0%,100%{transform:translateY(0)}
-    50%{transform:translateY(-10px)}
-  }
-  /* 下滑浏览提醒 */
+    /* 下滑浏览提醒 */
   .scroll-hint{
-    display:flex;flex-direction:column;align-items:center;gap:10px;
+    display:flex;flex-direction:column;align-items:center;gap:12px;
     margin-top:7vh;
-    color:var(--faint);font-size:11px;letter-spacing:.4em;
     opacity:0;animation:hintIn 1.4s ease 1.6s forwards;
   }
-  .scroll-hint .mouse{
-    width:22px;height:36px;border:1.5px solid rgba(10,10,18,.30);
-    border-radius:12px;position:relative;
+  .scroll-hint .arrow-wrap{
+    display:flex;flex-direction:column;align-items:center;gap:2px;
+    animation:arrowFloat 2.2s cubic-bezier(.4,0,.6,1) infinite;
   }
-  .scroll-hint .mouse::after{
-    content:'';position:absolute;left:50%;top:7px;
-    width:3px;height:7px;margin-left:-1.5px;
-    border-radius:3px;background:rgba(10,10,18,.45);
-    animation:wheel 1.8s cubic-bezier(.4,0,.6,1) infinite;
+  .scroll-hint .chev{
+    width:10px;height:10px;
+    border-right:1.5px solid rgba(10,10,18,.38);
+    border-bottom:1.5px solid rgba(10,10,18,.38);
+    transform:rotate(45deg);
   }
-  @keyframes wheel{
-    0%{transform:translateY(0);opacity:1}
-    70%{transform:translateY(11px);opacity:0}
-    100%{transform:translateY(0);opacity:0}
+  .scroll-hint .chev:nth-child(2){opacity:.55;margin-top:-7px}
+  .scroll-hint .chev:nth-child(3){opacity:.25;margin-top:-7px}
+  .scroll-hint span{
+    font-size:11px;letter-spacing:.4em;color:var(--faint);
+  }
+  @keyframes arrowFloat{
+    0%,100%{transform:translateY(0);opacity:1}
+    55%{transform:translateY(7px);opacity:.55}
+    100%{transform:translateY(0);opacity:1}
   }
   @keyframes hintIn{
     from{opacity:0;transform:translateY(16px)}
+    to{opacity:1;transform:none}
+  }
     to{opacity:1;transform:none}
   }
   .s-cover h1 .accent{
@@ -241,7 +242,6 @@
 
     <h1 class="up hero-title">
       <span class="line1">MINova</span>
-      <span class="line2">官网</span>
     </h1>
 
     <div class="hero-btns up" style="margin-top:5vh;display:flex;gap:16px;flex-wrap:wrap">
@@ -269,7 +269,9 @@
       </a>
     </div>
     <div class="scroll-hint up">
-      <div class="mouse"></div>
+      <div class="arrow-wrap">
+        <i class="chev"></i><i class="chev"></i><i class="chev"></i>
+      </div>
       <span>往下滑浏览</span>
     </div>
   </section>
